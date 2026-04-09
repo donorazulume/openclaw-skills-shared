@@ -34,6 +34,12 @@ Infrastructure (Docker Compose, Caddy, MCP servers, deploy scripts) lives in
 `openclaw-docker`; agent-specific skills and configs live in `openclaw-roho`
 and `openclaw-amara`.
 
+**ClickUp orchestrator (SPEC-CUOR-001):** The dedup-first CLI `clickup-orchestrator` ships in
+[openclaw-docker](https://github.com/donorazulume/openclaw-docker) (reference, tests, guard scripts)
+and [openclaw-roho](https://github.com/donorazulume/openclaw-roho) (production image). It is
+stdlib-only and is **not** part of this submodule; shared ClickUp HTTP helpers could land in `lib/`
+here in the future if needed.
+
 ```
 openclaw-docker          (infrastructure + base image)
 openclaw-skills-shared   (this repo — shared skill packages)
