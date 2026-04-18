@@ -5,6 +5,8 @@ import importlib.util
 import os
 import base64
 import json
+import tempfile
+from pathlib import Path
 from email import message_from_bytes
 from email.mime.multipart import MIMEMultipart
 
@@ -15,8 +17,10 @@ sys.modules['google.auth.transport.requests'] = MagicMock()
 sys.modules['googleapiclient.discovery'] = MagicMock()
 sys.modules['requests'] = MagicMock()
 
-# Import the module
-spec = importlib.util.spec_from_file_location("triage", "skills/gmail-executive/triage.py")
+# Import the module (same directory as this test; works in CI and local clones)
+_SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
+_TRIAGE_PATH = os.path.join(_SKILL_DIR, "triage.py")
+spec = importlib.util.spec_from_file_location("triage", _TRIAGE_PATH)
 triage = importlib.util.module_from_spec(spec)
 sys.modules["triage"] = triage
 spec.loader.exec_module(triage)
@@ -33,7 +37,7 @@ def _make_mock_service(message_id="msg_abc123"):
     return svc
 
 
-def _decode_mime(service_mock) -> MIMEMultipart:
+def _decode_mime(service_mock):
     """Extract and decode the MIME message from the mock service call."""
     call_kwargs = service_mock.users().messages().send.call_args
     raw_b64 = call_kwargs[1]["body"]["raw"] if call_kwargs[1] else call_kwargs[0][0]["raw"]
@@ -584,6 +588,64 @@ class TestSendEmail(unittest.TestCase):
         self.assertEqual(parsed["message_id"], "msg_json_test")
         self.assertIn("message", parsed)
 
+    def test_send_with_file_attachment_mixed_mime(self):
+        """With attachments, root is multipart/mixed; body stays alternative + file."""
+        svc = _make_mock_service("msg_att_1")
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "note.txt"
+            p.write_text("hello attachment", encoding="utf-8")
+
+            with patch('builtins.print'):
+                result = triage.send_email(
+                    svc,
+                    to=["client@example.com"],
+                    subject="Docs",
+                    body_markdown="Please see attached.",
+                    cc=[],
+                    attachments=[str(p)],
+                )
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn("attachment_paths", result)
+        mime_msg = _decode_mime(svc)
+        self.assertEqual(mime_msg.get_content_type(), "multipart/mixed")
+        subtypes = [
+            p.get_content_type()
+            for p in mime_msg.walk()
+        ]
+        self.assertIn("multipart/alternative", subtypes)
+        self.assertIn("text/plain", subtypes)
+        self.assertIn("text/html", subtypes)
+        # Attached part
+        attach_parts = [
+            x for x in mime_msg.walk()
+            if x.get_content_disposition() == "attachment"
+        ]
+        self.assertEqual(len(attach_parts), 1)
+        self.assertEqual(
+            attach_parts[0].get_payload(decode=True),
+            b"hello attachment",
+        )
+
+    def test_attachment_blocked_extension(self):
+        svc = _make_mock_service()
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "malware.exe"
+            p.write_bytes(b"MZ")
+
+            with patch('builtins.print'):
+                result = triage.send_email(
+                    svc,
+                    to=["a@b.com"],
+                    subject="S",
+                    body_markdown="B",
+                    attachments=[str(p)],
+                )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "ATTACHMENT_BLOCKED")
+        svc.users().messages().send.assert_not_called()
+
 
 # ── Body extraction ──────────────────────────────────────────────────
 
@@ -636,6 +698,36 @@ class TestExtractBodyText(unittest.TestCase):
 
     def test_empty_payload(self):
         self.assertEqual(triage._extract_body_text({}), "")
+
+
+class TestCollectAttachmentMetadata(unittest.TestCase):
+
+    def test_finds_nested_attachment(self):
+        payload = {
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {
+                    "mimeType": "multipart/alternative",
+                    "parts": [
+                        {
+                            "mimeType": "text/plain",
+                            "body": {"data": base64.urlsafe_b64encode(b"hi").decode()},
+                        },
+                    ],
+                },
+                {
+                    "mimeType": "application/pdf",
+                    "filename": "scan.pdf",
+                    "body": {"attachmentId": "ANG123", "size": 4444},
+                    "partId": "1",
+                },
+            ],
+        }
+        meta = triage.collect_attachment_metadata(payload)
+        self.assertEqual(len(meta), 1)
+        self.assertEqual(meta[0]["attachment_id"], "ANG123")
+        self.assertEqual(meta[0]["filename"], "scan.pdf")
+        self.assertEqual(meta[0]["mime_type"], "application/pdf")
 
 
 # ── Unread-only INBOX + mark read on triage ───────────────────────────

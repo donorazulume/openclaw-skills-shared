@@ -21,7 +21,7 @@ Other actions (`status`, `digest`, `ingest`, …) are not bound by this unread-o
 
 - **Initialize:** Sets up the required labels (`01_Action`, `02_Waiting`, `03_Read`, `PARA/…`).
 - **Triage:** Scans **unread** INBOX mail only, applies rule-based classification with expert priority detection (urgent/deadline → `01_Action`, pending approval → `02_Waiting`, newsletters → `03_Read`, invoices → `PARA/Areas`), moves matching messages to Stacks and **marks them read**.
-- **Send:** Compose and send emails. Provide the body in **standard Markdown** — the execution layer converts it to HTML and plain-text automatically. **Do not use HTML.** `don@chimexhldg.com` is always CC'd.
+- **Send:** Compose and send emails. Provide the body in **standard Markdown** — the execution layer converts it to HTML and plain-text automatically. **Do not use HTML.** `don@chimexhldg.com` is always CC'd. Optional **file attachments** (`--attach`, repeatable) send as `multipart/mixed` with validation (size, extension allowlist; see **Attachments** below).
 - **Draft:** Creates draft replies for specific threads (uses `gmail.compose`).
 - **Labels:** List all Gmail labels.
 - **Digest:** Lists unread items in `01_Action` and `03_Read`.
@@ -97,6 +97,29 @@ Optionally CC additional recipients (comma-separated):
 python3 {baseDir}/triage.py --action send --to "client@example.com" --cc "colleague@example.com" --subject "Update" --body-markdown "* Item 1\n* Item 2"
 ```
 
+Attach one or more files (PDF, Office, images, ZIP, etc. — validated; max size per Gmail):
+
+```bash
+python3 {baseDir}/triage.py --action send --to "client@example.com" --subject "Signed agreement" \
+  --body-markdown "Please find the agreement attached." \
+  --attach "/path/to/contract.pdf"
+```
+
+List attachment metadata on a stored message:
+
+```bash
+python3 {baseDir}/triage.py --action list-attachments --message-id "<MESSAGE_ID>"
+```
+
+Download an attachment by id from that listing:
+
+```bash
+python3 {baseDir}/triage.py --action download-attachment \
+  --message-id "<MESSAGE_ID>" --attachment-id "<ATTACHMENT_ID>" --output "/path/to/out.pdf"
+```
+
+Canonical reference: [GMAIL-ATTACHMENTS.md](https://github.com/donorazulume/openclaw-roho/blob/main/docs/GMAIL-ATTACHMENTS.md) in **openclaw-roho** (limits, env vars, security notes).
+
 ### Draft a Reply
 
 ```bash
@@ -126,6 +149,8 @@ Internal emails (`@chimexhldg.com`) are auto-approved. External emails require h
 ```bash
 python3 {baseDir}/email_ops.py --action send-gated --to "vendor@example.com" --subject "Quote Request" --body-markdown "Please send the latest quote for **Project Alpha**."
 ```
+
+**Attachments:** `send-gated` / `finalize` do not yet persist attachment paths on pending transactions. For outbound mail **with files**, use `triage.py --action send` with `--attach` (or extend `email_ops` in a follow-up).
 
 ### Ingest & Preprocess Inbox
 

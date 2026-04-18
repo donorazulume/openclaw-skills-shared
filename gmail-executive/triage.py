@@ -12,6 +12,14 @@ Environment variables (injected via Doppler):
     GOOGLE_TOKEN_JSON         OAuth2 token JSON (contents of token.json)
     GOOGLE_CREDENTIALS_JSON   OAuth2 client credentials JSON (contents of credentials.json)
     GMAIL_TOKEN_JSON          Legacy alias for GOOGLE_TOKEN_JSON
+
+Attachments (optional overrides — Issue #1):
+    ATTACHMENT_MAX_SIZE           Max decoded bytes per file (default: 25 MiB)
+    ATTACHMENT_TOTAL_MAX_BYTES    Max combined file bytes for one send (default: 22 MiB)
+    ATTACHMENT_MAX_FILES          Max files per message (default: 15)
+    ALLOWED_FILE_TYPES            Comma list of extensions, e.g. ``.pdf,.docx,.png``
+    ATTACHMENT_TEMP_DIR           Download directory for ``download-attachment`` (default: /tmp/email_attachments)
+    ATTACHMENT_RETENTION_DAYS     Delete older files under ATTACHMENT_TEMP_DIR on download/list (default: 7)
 """
 
 from __future__ import annotations
@@ -21,13 +29,17 @@ import base64
 import html as html_module
 import json
 import logging
+import mimetypes
 import os
 import random
 import re
 import sys
 import time
+from email import encoders
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
 from typing import Any
 
 import markdown as md_lib
@@ -80,10 +92,159 @@ UNREAD_LABEL_ID = "UNREAD"
 FORCED_CC_ADDRESS = "don@chimexhldg.com"
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
+# Attachment policy (Issue #1 — robust MIME + validation). Sizes are decoded bytes on disk.
+_DEFAULT_ALLOWED_ATTACHMENT_EXTS: frozenset[str] = frozenset({
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".txt",
+    ".jpg", ".jpeg", ".png", ".gif", ".zip",
+})
+_BLOCKED_ATTACHMENT_EXTS: frozenset[str] = frozenset({
+    ".exe", ".bat", ".cmd", ".com", ".scr", ".pif", ".msi", ".dll",
+    ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".ps1", ".psm1",
+    ".hta", ".app", ".deb", ".rpm", ".dmg",
+})
+
 _email_counters: dict[str, int] = {
     "agent_emails_sent_total": 0,
     "agent_email_format_errors": 0,
 }
+
+
+def _attachment_max_size_bytes() -> int:
+    return int(os.environ.get("ATTACHMENT_MAX_SIZE", str(25 * 1024 * 1024)))
+
+
+def _attachment_total_max_bytes() -> int:
+    """Conservative cap so the full MIME stays under Gmail ~25 MB after encoding."""
+    return int(os.environ.get("ATTACHMENT_TOTAL_MAX_BYTES", str(22 * 1024 * 1024)))
+
+
+def _attachment_temp_dir() -> Path:
+    return Path(os.environ.get("ATTACHMENT_TEMP_DIR", "/tmp/email_attachments"))
+
+
+def _attachment_retention_days() -> int:
+    return int(os.environ.get("ATTACHMENT_RETENTION_DAYS", "7"))
+
+
+def _allowed_attachment_suffixes() -> set[str]:
+    raw = os.environ.get("ALLOWED_FILE_TYPES", "").strip()
+    if not raw:
+        return set(_DEFAULT_ALLOWED_ATTACHMENT_EXTS)
+    out: set[str] = set()
+    for token in raw.split(","):
+        t = token.strip().lower()
+        if not t:
+            continue
+        if not t.startswith("."):
+            t = "." + t
+        out.add(t)
+    return out or set(_DEFAULT_ALLOWED_ATTACHMENT_EXTS)
+
+
+def _max_attachments_per_send() -> int:
+    return int(os.environ.get("ATTACHMENT_MAX_FILES", "15"))
+
+
+def _safe_attachment_basename(name: str) -> str:
+    base = os.path.basename((name or "").strip()) or "attachment"
+    if base in (".", ".."):
+        base = "attachment"
+    return base
+
+
+def _cleanup_expired_attachment_files() -> None:
+    """Remove files under ATTACHMENT_TEMP_DIR older than ATTACHMENT_RETENTION_DAYS."""
+    root = _attachment_temp_dir()
+    if not root.is_dir():
+        return
+    cutoff = time.time() - (_attachment_retention_days() * 86400)
+    try:
+        for p in root.iterdir():
+            if p.is_file() and p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("Attachment cleanup failed: %s", exc)
+
+
+def _validate_attachment_paths(paths: list[str]) -> tuple[list[Path] | None, dict[str, Any] | None]:
+    """Return (resolved paths, None) or (None, error_response)."""
+    if not paths:
+        return [], None
+    allowed = _allowed_attachment_suffixes()
+    max_one = _attachment_max_size_bytes()
+    max_total = _attachment_total_max_bytes()
+    max_files = _max_attachments_per_send()
+    if len(paths) > max_files:
+        return None, {
+            "status": "error",
+            "error_code": "ATTACHMENT_TOO_MANY",
+            "message": f"At most {max_files} attachments per message (got {len(paths)}).",
+        }
+    resolved: list[Path] = []
+    total = 0
+    for raw in paths:
+        p = Path(raw).expanduser().resolve()
+        sfx = p.suffix.lower()
+        if sfx in _BLOCKED_ATTACHMENT_EXTS:
+            return None, {
+                "status": "error",
+                "error_code": "ATTACHMENT_BLOCKED",
+                "message": f"Extension not allowed (blocked): {sfx} ({p.name})",
+            }
+        if sfx not in allowed:
+            return None, {
+                "status": "error",
+                "error_code": "ATTACHMENT_NOT_ALLOWED",
+                "message": (
+                    f"File type not allowed: {sfx or '(none)'} ({p.name}). "
+                    f"Allowed: {', '.join(sorted(allowed))}"
+                ),
+            }
+        if not p.is_file():
+            return None, {
+                "status": "error",
+                "error_code": "ATTACHMENT_NOT_FOUND",
+                "message": f"Not a readable file: {raw}",
+            }
+        sz = p.stat().st_size
+        if sz > max_one:
+            return None, {
+                "status": "error",
+                "error_code": "ATTACHMENT_TOO_LARGE",
+                "message": f"{p.name} exceeds max size ({max_one} bytes).",
+            }
+        total += sz
+        if total > max_total:
+            return None, {
+                "status": "error",
+                "error_code": "ATTACHMENT_TOTAL_TOO_LARGE",
+                "message": (
+                    f"Attachments exceed combined size limit ({max_total} bytes). "
+                    "Reduce count or size; Gmail enforces ~25 MB per message."
+                ),
+            }
+        resolved.append(p)
+    return resolved, None
+
+
+def _build_alternative_part(plain_body: str, html_body: str) -> MIMEMultipart:
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(plain_body, "plain"))
+    alt.attach(MIMEText(html_body, "html"))
+    return alt
+
+
+def _mime_attachment_part(file_path: Path) -> MIMEBase:
+    data = file_path.read_bytes()
+    mime_guess = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    main, sub = mime_guess.split("/", 1) if "/" in mime_guess else ("application", "octet-stream")
+    part = MIMEBase(main, sub)
+    part.set_payload(data)
+    encoders.encode_base64(part)
+    fname = _safe_attachment_basename(file_path.name)
+    part.add_header("Content-Disposition", "attachment", filename=fname)
+    return part
+
 
 # ── Auth ─────────────────────────────────────────────────────────────
 
@@ -210,6 +371,122 @@ def _extract_body_text(payload: dict[str, Any]) -> str:
                 return result
 
     return ""
+
+
+def collect_attachment_metadata(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """List attachment parts (filename, Gmail attachmentId, size). Recursive MIME walk."""
+
+    found: list[dict[str, Any]] = []
+
+    def _header_filename(part: dict[str, Any]) -> str:
+        for h in part.get("headers") or []:
+            if (h.get("name") or "").lower() != "content-disposition":
+                continue
+            val = h.get("value") or ""
+            m = re.search(
+                r"filename\*=(?:UTF-8''|)([^;\r\n]+)|filename=\"([^\"]+)\"|filename=([^;\s]+)",
+                val,
+                re.I,
+            )
+            if m:
+                return (m.group(1) or m.group(2) or m.group(3) or "").strip()
+        return ""
+
+    def walk(part: dict[str, Any]) -> None:
+        body = part.get("body") or {}
+        aid = body.get("attachmentId")
+        fname = (part.get("filename") or "").strip() or _header_filename(part)
+        if aid:
+            found.append(
+                {
+                    "attachment_id": aid,
+                    "filename": fname or f"attachment-{part.get('partId', '?')}",
+                    "mime_type": part.get("mimeType", "application/octet-stream"),
+                    "size": int(body.get("size") or 0),
+                    "part_id": part.get("partId", ""),
+                }
+            )
+        for sub in part.get("parts") or []:
+            walk(sub)
+
+    walk(payload)
+    return found
+
+
+def list_attachments_action(service, message_id: str) -> None:
+    msg = service.users().messages().get(
+        userId="me", id=message_id, format="full",
+    ).execute()
+    meta = collect_attachment_metadata(msg.get("payload", {}))
+    print(
+        json.dumps(
+            {
+                "message_id": message_id,
+                "has_attachments": bool(msg.get("hasAttachments")) or bool(meta),
+                "attachments": meta,
+            },
+            indent=2,
+        )
+    )
+
+
+def download_attachment_action(
+    service,
+    message_id: str,
+    attachment_id: str,
+    output_path: str | None,
+    filename_hint: str | None = None,
+) -> dict[str, Any]:
+    """Download a Gmail attachment to disk (validated path under temp dir or explicit output)."""
+    _cleanup_expired_attachment_files()
+    att = (
+        service.users()
+        .messages()
+        .attachments()
+        .get(userId="me", messageId=message_id, id=attachment_id)
+        .execute()
+    )
+    data_b64 = att.get("data", "")
+    raw = base64.urlsafe_b64decode(data_b64.encode("ascii"))
+    max_sz = _attachment_max_size_bytes()
+    if len(raw) > max_sz:
+        err = {
+            "status": "error",
+            "error_code": "ATTACHMENT_TOO_LARGE",
+            "message": f"Downloaded attachment exceeds configured max ({max_sz} bytes).",
+        }
+        print(json.dumps(err, indent=2))
+        return err
+
+    if output_path:
+        dest = Path(output_path).expanduser().resolve()
+    else:
+        base_dir = _attachment_temp_dir()
+        base_dir.mkdir(parents=True, exist_ok=True)
+        safe = _safe_attachment_basename(filename_hint or f"{attachment_id[:16]}.dat")
+        dest = base_dir / f"{message_id[:12]}_{attachment_id[:16]}_{safe}"
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.write_bytes(raw)
+    except OSError as exc:
+        err = {
+            "status": "error",
+            "error_code": "ATTACHMENT_IO_ERROR",
+            "message": str(exc),
+        }
+        print(json.dumps(err, indent=2))
+        return err
+
+    out = {
+        "status": "success",
+        "path": str(dest),
+        "bytes": len(raw),
+        "message_id": message_id,
+        "attachment_id": attachment_id,
+    }
+    print(json.dumps(out, indent=2))
+    return out
 
 
 # ── Actions ──────────────────────────────────────────────────────────
@@ -640,9 +917,16 @@ def triage_report(
             m["id"]: _extract_body_text(m.get("payload", {}))[:3000]
             for m in full_bodies
         }
+        attach_map = {
+            m["id"]: collect_attachment_metadata(m.get("payload", {}))
+            for m in full_bodies
+        }
         for record in email_records:
             if record["id"] in body_map:
                 record["body_preview"] = body_map[record["id"]]
+            am = attach_map.get(record["id"])
+            if am:
+                record["attachments"] = am
 
     skipped = sum(1 for r in email_records if r["label"] == "INBOX")
 
@@ -750,12 +1034,14 @@ def send_email(
     body_markdown: str,
     cc: list[str] | None = None,
     _quiet: bool = False,
+    attachments: list[str] | None = None,
 ) -> dict[str, Any]:
     """Compose and send an email.
 
     Accepts Markdown in *body_markdown*; the execution layer converts it to
     a multipart/alternative payload (text/plain + text/html).
-    don@chimexhldg.com is always CC'd regardless of agent input.
+    Optional *attachments* are paths to files appended as MIME parts under
+    multipart/mixed (Issue #1). don@chimexhldg.com is always CC'd regardless of agent input.
     """
     agent_name = os.environ.get("OPENCLAW_AGENT_NAME", "unknown")
 
@@ -794,12 +1080,32 @@ def send_email(
     html_body = _markdown_to_html(body_markdown)
     plain_body = _markdown_to_plaintext(body_markdown)
 
-    mime = MIMEMultipart("alternative")
-    mime["to"] = ", ".join(to)
-    mime["cc"] = ", ".join(cc)
-    mime["subject"] = subject
-    mime.attach(MIMEText(plain_body, "plain"))
-    mime.attach(MIMEText(html_body, "html"))
+    att_paths = [a for a in (attachments or []) if a.strip()]
+    resolved: list[Path] = []
+    if att_paths:
+        maybe_paths, att_err = _validate_attachment_paths(att_paths)
+        if att_err:
+            _email_counters["agent_email_format_errors"] += 1
+            if not _quiet:
+                print(json.dumps(att_err, indent=2))
+            return att_err
+        resolved = maybe_paths or []
+
+    if resolved:
+        mime = MIMEMultipart("mixed")
+        mime["to"] = ", ".join(to)
+        mime["cc"] = ", ".join(cc)
+        mime["subject"] = subject
+        mime.attach(_build_alternative_part(plain_body, html_body))
+        for fp in resolved:
+            mime.attach(_mime_attachment_part(fp))
+    else:
+        mime = MIMEMultipart("alternative")
+        mime["to"] = ", ".join(to)
+        mime["cc"] = ", ".join(cc)
+        mime["subject"] = subject
+        mime.attach(MIMEText(plain_body, "plain"))
+        mime.attach(MIMEText(html_body, "html"))
 
     raw = base64.urlsafe_b64encode(mime.as_bytes()).decode("utf-8")
 
@@ -829,6 +1135,8 @@ def send_email(
         "message": f"Email sent successfully to {to} and cc'd to {cc}.",
         "message_id": message_id,
     }
+    if resolved:
+        response["attachment_paths"] = [str(p) for p in resolved]
     if not _quiet:
         print(json.dumps(response, indent=2))
     return response
@@ -940,7 +1248,18 @@ def main() -> None:
     parser.add_argument(
         "--action",
         required=True,
-        choices=["init", "status", "triage", "triage-report", "draft", "send", "labels", "digest"],
+        choices=[
+            "init",
+            "status",
+            "triage",
+            "triage-report",
+            "draft",
+            "send",
+            "labels",
+            "digest",
+            "list-attachments",
+            "download-attachment",
+        ],
         help="Action to perform.",
     )
     parser.add_argument("--limit", type=int, default=15, help="Max messages to triage (default: 15; use 10 for cron to smooth TPM).")
@@ -955,6 +1274,33 @@ def main() -> None:
     parser.add_argument("--body-markdown", dest="body_markdown",
                         help="Email body in Markdown format for send. Do not use HTML.")
     parser.add_argument("--body", help="Plain-text body for draft reply (or legacy send fallback).")
+    parser.add_argument(
+        "--attach",
+        action="append",
+        dest="attachments",
+        metavar="PATH",
+        help='File to attach (repeatable). Used with --action send.',
+    )
+    parser.add_argument(
+        "--message-id",
+        dest="message_id",
+        help="Gmail message id (list-attachments / download-attachment).",
+    )
+    parser.add_argument(
+        "--attachment-id",
+        dest="attachment_id",
+        help="Gmail attachment id from list-attachments (download-attachment).",
+    )
+    parser.add_argument(
+        "--output",
+        dest="output",
+        help="Destination path for download-attachment (optional: default under ATTACHMENT_TEMP_DIR).",
+    )
+    parser.add_argument(
+        "--filename-hint",
+        dest="filename_hint",
+        help="Original filename when saving to temp dir (download-attachment).",
+    )
 
     args = parser.parse_args()
 
@@ -992,8 +1338,31 @@ def main() -> None:
             parser.error("--body-markdown is required for send")
         to_list = [a.strip() for a in args.to.split(",") if a.strip()]
         cc_list = [a.strip() for a in (args.cc or "").split(",") if a.strip()]
-        result = send_email(service, to_list, args.subject, body, cc=cc_list)
+        att = getattr(args, "attachments", None) or None
+        result = send_email(
+            service, to_list, args.subject, body, cc=cc_list, attachments=att,
+        )
         if result["status"] == "error":
+            sys.exit(1)
+
+    elif args.action == "list-attachments":
+        if not args.message_id:
+            parser.error("--message-id is required for list-attachments")
+        list_attachments_action(service, args.message_id)
+
+    elif args.action == "download-attachment":
+        if not args.message_id:
+            parser.error("--message-id is required for download-attachment")
+        if not args.attachment_id:
+            parser.error("--attachment-id is required for download-attachment")
+        dl = download_attachment_action(
+            service,
+            args.message_id,
+            args.attachment_id,
+            args.output,
+            filename_hint=args.filename_hint,
+        )
+        if dl.get("status") == "error":
             sys.exit(1)
 
     elif args.action == "labels":

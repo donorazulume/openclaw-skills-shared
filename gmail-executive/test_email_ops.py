@@ -22,8 +22,9 @@ os.environ["MATTERMOST_WEBHOOK_SECRET"] = "test-secret-key"
 
 import importlib.util
 
+_OPS_DIR = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.util.spec_from_file_location(
-    "email_ops", "skills/gmail-executive/email_ops.py",
+    "email_ops", os.path.join(_OPS_DIR, "email_ops.py"),
 )
 email_ops = importlib.util.module_from_spec(_spec)
 sys.modules["email_ops"] = email_ops
