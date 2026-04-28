@@ -8,17 +8,34 @@ Shared skill packages used by all three OpenClaw principal agents:
 This repository is consumed as a **git submodule** by each agent repository.
 Changes here propagate to agents when each repo updates its submodule reference.
 
-## Skills
+## Skills (canonical per-agent assignment — Issue #281 Batch C)
 
-| Skill | Used by | Purpose |
-|-------|---------|---------|
-| `lib/` | All | Shared Python utility library imported by multiple skills |
-| `mattermost-bridge/` | All | Post envelopes / messages to Mattermost (the inter-agent coordination bus) |
-| `rag-brain-manager/` | All | Open Brain RAG client (hybrid search, ingest, rerank) |
-| `openbrain-client/` | All | Lower-level Open Brain MCP server client operations |
-| `clickup-manager/` | Roho, Amara | ClickUp project management integration |
-| `google-manager/` | Roho, Amara | Google Workspace (Calendar, Drive, Contacts) integration |
-| `gmail-executive/` | Roho, Amara | Gmail monitoring, triage, and email management |
+This table is the **canonical authority** for which shared skills each agent
+includes in its image. Each agent's `Dockerfile` MUST mirror this matrix
+exactly via selective `COPY ./skills-shared/<skill>/ ...` — _wholesale_
+`COPY ./skills-shared/ ...` is forbidden because it leaks Roho-only skills
+into Amara/Rob and creates identity-bleed risk.
+
+| Skill | Roho | Amara | Rob | Purpose |
+|-------|:----:|:-----:|:---:|---------|
+| `lib/`               | ✓ | ✓ | ✓ | Shared Python utility library imported by multiple skills |
+| `mattermost-bridge/` | ✓ | ✓ | ✓ | Post envelopes / messages to Mattermost (the inter-agent coordination bus) |
+| `rag-brain-manager/` | ✓ | ✓ | ✓ | Open Brain RAG client (hybrid search, ingest, rerank) |
+| `openbrain-client/`  | ✓ | ✓ | ✓ | Lower-level Open Brain MCP server client operations |
+| `clickup-manager/`   | ✓ | ✓ |   | PARA-board project management integration (Amara: property tickets/maintenance; Roho: full PM) |
+| `google-manager/`    | ✓ |   |   | Don's Google Workspace (Calendar, Drive, Contacts) — **Roho only** |
+| `gmail-executive/`   | ✓ |   |   | Don's Gmail monitoring, triage, and email management — **Roho only** |
+
+**Why Amara is excluded from `gmail-executive` / `google-manager`:** her
+domain is Microsoft 365 (mailbox `amara@chimexhldg.com` via
+`chimex-property-manager`, OneDrive via `graph_file_manager`). Don's
+Gmail and Google Workspace are Roho's responsibility; Amara dispatches
+via `#coordination` if a property workflow needs them.
+
+**Why Rob carries only the four core shared skills:** his domain is
+financial / market analysis (HMRC filings, Firefly III reconciliation,
+market intel) — none of which require ClickUp, Gmail, or Google Drive.
+Rob's local `skills/` adds `rob-hmrc`, `rob-firefly`, and `rob-analytics`.
 
 ## Usage
 
