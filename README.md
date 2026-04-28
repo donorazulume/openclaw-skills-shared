@@ -1,20 +1,24 @@
 # openclaw-skills-shared
 
-Shared skill packages used by both [Roho](https://github.com/donorazulume/openclaw-roho)
-and [Amara](https://github.com/donorazulume/openclaw-amara) OpenClaw agents.
+Shared skill packages used by all three OpenClaw principal agents:
+[Roho](https://github.com/donorazulume/openclaw-roho),
+[Amara](https://github.com/donorazulume/openclaw-amara), and
+[Rob](https://github.com/donorazulume/openclaw-rob).
 
-This repository is consumed as a **git submodule** by both agent repositories.
+This repository is consumed as a **git submodule** by each agent repository.
 Changes here propagate to agents when each repo updates its submodule reference.
 
 ## Skills
 
-| Skill | Purpose |
-|-------|---------|
-| `lib/` | Shared Python utility library imported by multiple skills |
-| `clickup-manager/` | ClickUp project management integration |
-| `google-manager/` | Google Workspace (Calendar, Drive, Contacts) integration |
-| `gmail-executive/` | Gmail monitoring, triage, and email management |
-| `openbrain-client/` | Open Brain MCP server client operations |
+| Skill | Used by | Purpose |
+|-------|---------|---------|
+| `lib/` | All | Shared Python utility library imported by multiple skills |
+| `mattermost-bridge/` | All | Post envelopes / messages to Mattermost (the inter-agent coordination bus) |
+| `rag-brain-manager/` | All | Open Brain RAG client (hybrid search, ingest, rerank) |
+| `openbrain-client/` | All | Lower-level Open Brain MCP server client operations |
+| `clickup-manager/` | Roho, Amara | ClickUp project management integration |
+| `google-manager/` | Roho, Amara | Google Workspace (Calendar, Drive, Contacts) integration |
+| `gmail-executive/` | Roho, Amara | Gmail monitoring, triage, and email management |
 
 ## Usage
 
@@ -45,6 +49,7 @@ openclaw-docker          (infrastructure + base image)
 openclaw-skills-shared   (this repo — shared skill packages)
 openclaw-roho            (Roho agent skills, config, deploy)
 openclaw-amara           (Amara agent skills, config, deploy)
+openclaw-rob             (Rob agent skills, config, deploy)
 ```
 
 All repositories conform to [SPEC-NETARCH-001](https://github.com/donorazulume/openclaw-docker/tree/main/sdds/SPEC-NETARCH-001).

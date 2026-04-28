@@ -1,0 +1,23 @@
+chromadb>=1.0.0
+google-genai>=1.0.0
+google-cloud-storage>=3.0.0
+# SPEC-RAG-001: LlamaIndex ecosystem for enhanced indexing & retrieval
+# llama-index-embeddings-huggingface declares huggingface-hub[inference]. On hub 1.x the
+# `inference` extra is not yet in package metadata (it exists on 0.x and pulls aiohttp), so pip
+# may warn "does not provide the extra 'inference'" — benign. Pin hub + aiohttp for runtime parity.
+huggingface-hub>=1.7.2,<2
+aiohttp>=3.9.0
+llama-index-core>=0.12.0
+llama-index-vector-stores-chroma>=0.4.0
+llama-index-embeddings-gemini>=0.3.0
+llama-index-embeddings-huggingface>=0.4.0
+llama-index-readers-file>=0.4.0
+llama-index-postprocessor-sbert-rerank>=0.3.0
+# SPEC-RAG-001: BM25 keyword search + sentence-transformers for reranking
+# NOTE (#186): torch is pre-installed as CPU-only in Dockerfile.deploy (Layer 2)
+# via --index-url https://download.pytorch.org/whl/cpu. Do NOT add torch here —
+# sentence-transformers will use the pre-installed CPU-only wheel. If torch
+# appears here without the CPU constraint, pip may pull the 915MB CUDA wheel
+# and exhaust the 50GB boot disk on the GCE VM.
+rank-bm25>=0.2.2
+sentence-transformers>=3.0.0
