@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
 
 MM_URL = os.environ.get("MATTERMOST_URL", "http://mattermost:8065").rstrip("/")
 MM_TOKEN = os.environ.get("MATTERMOST_BOT_TOKEN", "")
+_CHANNEL_ID_PATTERN = re.compile(r"^[a-z0-9]{26}$")
 
 
 def _api(method: str, path: str, body: dict | None = None) -> dict:
@@ -50,6 +52,11 @@ def _api(method: str, path: str, body: dict | None = None) -> dict:
 
 
 def _resolve_channel(name: str) -> str | None:
+    if _CHANNEL_ID_PATTERN.match(name):
+        ch = _api("GET", f"/channels/{name}")
+        if isinstance(ch, dict) and ch.get("id") and not ch.get("error"):
+            return ch["id"]
+        return None
     me = _api("GET", "/users/me")
     if me.get("error") and "id" not in me:
         return None

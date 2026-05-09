@@ -23,6 +23,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -100,6 +101,9 @@ def _api(
 
 _channel_cache: dict[str, str] = {}
 
+# Mattermost channel IDs are 26-char lowercase alphanumeric (openclaw-docker#301).
+_CHANNEL_ID_PATTERN = re.compile(r"^[a-z0-9]{26}$")
+
 
 def _resolve_team_id_pref() -> Optional[str]:
     """Prefer MATTERMOST_TEAM_ID, else resolve MATTERMOST_TEAM_NAME via API."""
@@ -113,13 +117,20 @@ def _resolve_team_id_pref() -> Optional[str]:
 
 
 def _resolve_channel(name: str) -> Optional[str]:
-    """Resolve a channel name to its ID. Caches results.
+    """Resolve a channel name or channel ID to its ID. Caches results.
 
     When MATTERMOST_TEAM_ID or MATTERMOST_TEAM_NAME is set, only that team is used
     (avoids posting to a channel name that exists in another team — Issue #195).
     """
     if name in _channel_cache:
         return _channel_cache[name]
+
+    if _CHANNEL_ID_PATTERN.match(name):
+        ch = _api("GET", f"/channels/{name}")
+        if isinstance(ch, dict) and ch.get("id") and not ch.get("error"):
+            _channel_cache[name] = ch["id"]
+            return ch["id"]
+        return None
 
     pref_tid = _resolve_team_id_pref()
     if pref_tid:
