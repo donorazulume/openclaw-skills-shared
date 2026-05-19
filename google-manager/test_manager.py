@@ -1,281 +1,105 @@
+"""Tests for the MCP-Google edition of google-manager (#323/#324)."""
 
+from __future__ import annotations
+
+import importlib.util
+import os
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta, timezone
-import io
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-# ----------------------------------------------------------------------
-# 1. Mock external dependencies BEFORE importing manager
-# ----------------------------------------------------------------------
-sys.modules["google"] = MagicMock()
-sys.modules["google.auth"] = MagicMock()
-sys.modules["google.auth.transport"] = MagicMock()
-sys.modules["google.auth.transport.requests"] = MagicMock()
-sys.modules["google.oauth2"] = MagicMock()
-sys.modules["google.oauth2.credentials"] = MagicMock()
-sys.modules["googleapiclient"] = MagicMock()
-sys.modules["googleapiclient.discovery"] = MagicMock()
-sys.modules["googleapiclient.errors"] = MagicMock()
-sys.modules["googleapiclient.http"] = MagicMock()
-sys.modules["requests"] = MagicMock()
+_here = Path(__file__).resolve().parent
+sys.path.insert(0, str(_here.parent / "lib"))
 
-# Specific attributes
-sys.modules["google.auth.transport.requests"].Request = MagicMock()
-sys.modules["google.oauth2.credentials"].Credentials = MagicMock()
-sys.modules["googleapiclient.discovery"].build = MagicMock()
-# manager.py: from googleapiclient.errors import HttpError
-class MockHttpError(Exception):
-    def __init__(self, resp, content, uri=None):
-        self.resp = resp
-        self.content = content
-        self.uri = uri
-sys.modules["googleapiclient.errors"].HttpError = MockHttpError
+for _mod in ("dateutil",):
+    if _mod not in sys.modules:
+        # dateutil might not be installed in the local pytest env.
+        sys.modules[_mod] = MagicMock()
+        sys.modules["dateutil.parser"] = sys.modules[_mod].parser
 
-# Dateutil
-# manager.py: from dateutil import parser as dtparser
-mock_dateutil = MagicMock()
-mock_parser = MagicMock()
-def parse_iso(iso_str):
-    # Removing 'Z' for fromisoformat compatibility if needed, though usually standard ISO is fine
-    # Adding +00:00 if Z is present
-    if iso_str.endswith("Z"):
-        iso_str = iso_str[:-1] + "+00:00"
-    return datetime.fromisoformat(iso_str)
-mock_parser.parse.side_effect = parse_iso
-mock_dateutil.parser = mock_parser
-sys.modules["dateutil"] = mock_dateutil
+spec = importlib.util.spec_from_file_location("manager", str(_here / "manager.py"))
+manager = importlib.util.module_from_spec(spec)
+sys.modules["manager"] = manager
+spec.loader.exec_module(manager)
 
-# ----------------------------------------------------------------------
-# 2. Import module under test
-# ----------------------------------------------------------------------
-import os
-# Ensure we can import manager from current directory
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-import manager
+def _fake_call(tool, arguments=None, **_kw):
+    arguments = arguments or {}
+    if tool == "google_mail_search":
+        return {"messages": [{"id": "m1", "subject": "Hello", "from": "a@b.com"}], "total": 1}
+    if tool == "google_mail_label_info":
+        return {"id": arguments.get("label"), "name": arguments.get("label"), "messages_total": 1, "messages_unread": 0}
+    if tool == "google_mail_create_label":
+        return {"id": "L_x", "name": arguments.get("name"), "status": "created"}
+    if tool == "google_mail_send":
+        return {"message_id": "sent-1", "status": "sent"}
+    if tool == "google_drive_list":
+        return {"files": [], "total": 0}
+    if tool == "google_drive_create_folder":
+        return {"folder_id": "F_x", "name": arguments.get("name"), "status": "folder_created"}
+    if tool == "google_drive_get_file":
+        return {"id": arguments.get("file_id"), "name": "doc.pdf", "parents": ["root"], "description": ""}
+    if tool == "google_drive_update_file":
+        return {"file_id": arguments.get("file_id"), "status": "updated", "parents": []}
+    if tool == "google_drive_search":
+        return {"files": [], "total": 0}
+    if tool == "google_calendar_list_events":
+        return {"events": [], "total": 0}
+    if tool == "google_calendar_create_event":
+        return {"event_id": "evt-1", "summary": arguments.get("summary"), "status": "event_created"}
+    if tool == "google_calendar_update_event":
+        return {"event_id": arguments.get("event_id"), "status": "event_updated"}
+    raise AssertionError(f"unexpected tool: {tool}")
 
-# ----------------------------------------------------------------------
-# 3. Test Class
-# ----------------------------------------------------------------------
-class TestExpertJudgment(unittest.TestCase):
-    def setUp(self):
-        self.mock_service = MagicMock()
-        self.mock_events = self.mock_service.events.return_value
-        self.mock_list = self.mock_events.list.return_value
 
-    def _set_events(self, items):
-        self.mock_list.execute.return_value = {"items": items}
+class TestGmailWiring(unittest.TestCase):
+    def test_triage_calls_search_and_label_info(self):
+        with patch.object(manager.mcp_google, "call", side_effect=_fake_call) as mocked:
+            manager.gmail_triage(limit=5)
+        calls = [c.args[0] for c in mocked.call_args_list]
+        self.assertIn("google_mail_search", calls)
+        self.assertIn("google_mail_label_info", calls)
 
-    def test_no_meetings(self):
-        """Should return True when there are no meetings."""
-        self._set_events([])
-        with patch('sys.stdout', new=io.StringIO()) as fake_out:
-            result = manager.expert_judgment(self.mock_service)
-        self.assertTrue(result)
-        self.assertNotIn("Calendar Overload", fake_out.getvalue())
+    def test_create_labels_idempotent(self):
+        with patch.object(manager.mcp_google, "call", side_effect=_fake_call) as mocked:
+            manager.gmail_create_labels()
+        calls = [c.args[0] for c in mocked.call_args_list]
+        self.assertGreaterEqual(calls.count("google_mail_create_label"), len(manager.GMAIL_LABELS))
 
-    def test_under_limit(self):
-        """Should return True for meetings < 6 hours (e.g. 2 hours)."""
-        # 2 hours total
-        items = [
-            {
-                "summary": "Meeting 1",
-                "start": {"dateTime": "2023-01-01T09:00:00+00:00"},
-                "end": {"dateTime": "2023-01-01T11:00:00+00:00"}, # 120 mins
-            }
-        ]
-        self._set_events(items)
-        with patch('sys.stdout', new=io.StringIO()) as fake_out:
-            result = manager.expert_judgment(self.mock_service)
-        self.assertTrue(result)
-        self.assertNotIn("Calendar Overload", fake_out.getvalue())
 
-    def test_over_limit(self):
-        """Should return False for meetings > 6 hours (e.g. 7 hours)."""
-        # 7 hours total
-        items = [
-            {
-                "summary": "Long Meeting",
-                "start": {"dateTime": "2023-01-01T09:00:00+00:00"},
-                "end": {"dateTime": "2023-01-01T16:00:00+00:00"}, # 7 hours = 420 mins
-            }
-        ]
-        self._set_events(items)
-        with patch('sys.stdout', new=io.StringIO()) as fake_out:
-            result = manager.expert_judgment(self.mock_service)
-        self.assertFalse(result)
-        self.assertIn("Calendar Overload", fake_out.getvalue())
+class TestDriveWiring(unittest.TestCase):
+    def test_init_para_creates_missing(self):
+        with patch.object(manager.mcp_google, "call", side_effect=_fake_call) as mocked:
+            manager.drive_init_para()
+        calls = [c.args[0] for c in mocked.call_args_list]
+        self.assertEqual(calls.count("google_drive_list"), len(manager.PARA_FOLDERS))
+        self.assertEqual(calls.count("google_drive_create_folder"), len(manager.PARA_FOLDERS))
 
-    def test_ignore_focus_time(self):
-        """Should ignore events with 'Focus Time' in summary."""
-        items = [
-            {
-                "summary": "Focus Time",
-                "start": {"dateTime": "2023-01-01T09:00:00+00:00"},
-                "end": {"dateTime": "2023-01-01T17:00:00+00:00"}, # 8 hours
-            }
-        ]
-        self._set_events(items)
-        result = manager.expert_judgment(self.mock_service)
-        self.assertTrue(result)
+    def test_organize_renames_and_moves(self):
+        captured = []
 
-    def test_ignore_ooo(self):
-        """Should ignore events with 'OOO' in summary."""
-        items = [
-            {
-                "summary": "I am OOO",
-                "start": {"dateTime": "2023-01-01T09:00:00+00:00"},
-                "end": {"dateTime": "2023-01-01T17:00:00+00:00"}, # 8 hours
-            }
-        ]
-        self._set_events(items)
-        result = manager.expert_judgment(self.mock_service)
-        self.assertTrue(result)
+        def cap(tool, args=None, **_kw):
+            captured.append((tool, args or {}))
+            return _fake_call(tool, args)
 
-    def test_ignore_all_day_events(self):
-        """Should ignore all-day events (no dateTime)."""
-        items = [
-            {
-                "summary": "All Day Event",
-                "start": {"date": "2023-01-01"}, # No dateTime
-                "end": {"date": "2023-01-02"},
-            }
-        ]
-        self._set_events(items)
-        result = manager.expert_judgment(self.mock_service)
-        self.assertTrue(result)
+        with patch.object(manager.mcp_google, "call", side_effect=cap):
+            manager.drive_organize("file-1", target_folder="01_Projects/Demo", rename_desc="meeting notes")
+        tools = [c[0] for c in captured]
+        self.assertIn("google_drive_get_file", tools)
+        self.assertIn("google_drive_update_file", tools)
+        update_args = [c[1] for c in captured if c[0] == "google_drive_update_file"][0]
+        self.assertIn("meeting notes", update_args.get("new_name", ""))
+        self.assertTrue(update_args.get("add_parent_id"))
 
-    def test_large_meeting_warning(self):
-        """Should print warning for large meetings (> 10 attendees)."""
-        items = [
-            {
-                "summary": "Town Hall",
-                "start": {"dateTime": "2023-01-01T10:00:00+00:00"},
-                "end": {"dateTime": "2023-01-01T11:00:00+00:00"},
-                "attendees": [{"email": f"user{i}@example.com"} for i in range(11)]
-            }
-        ]
-        self._set_events(items)
-        with patch('sys.stdout', new=io.StringIO()) as fake_out:
-            result = manager.expert_judgment(self.mock_service)
 
-        # Result should be True (only 1 hour)
-        self.assertTrue(result)
-        # Check for warning
-        self.assertIn("Large Meeting", fake_out.getvalue())
-        self.assertIn("Town Hall", fake_out.getvalue())
+class TestNoOAuthImports(unittest.TestCase):
+    def test_manager_does_not_import_credentials(self):
+        text = (Path(__file__).resolve().parent / "manager.py").read_text(encoding="utf-8")
+        for forbidden in ("google.oauth2", "googleapiclient", "from google_clients"):
+            self.assertNotIn(forbidden, text, f"{forbidden} should no longer appear in manager.py (#323/#324)")
 
-    def test_api_exception(self):
-        """Should fail gracefully (return True) on API error."""
-        self.mock_list.execute.side_effect = Exception("API Error")
-        result = manager.expert_judgment(self.mock_service)
-        self.assertTrue(result)
 
-class TestDriveResolvePath(unittest.TestCase):
-    def setUp(self):
-        self.mock_service = MagicMock()
-        self.mock_files = self.mock_service.files.return_value
-        self.mock_list = self.mock_files.list.return_value
-
-    def test_batch_fetch_behavior(self):
-        """Should resolve path with a single batch API call."""
-        path = "A/B/C"
-
-        def list_side_effect(**kwargs):
-            q = kwargs.get('q', '')
-            mock_request = MagicMock()
-
-            # Check if it's the batch query
-            if "name = 'A'" in q and "name = 'B'" in q and "name = 'C'" in q:
-                # Return all files
-                mock_request.execute.return_value = {
-                    "files": [
-                        {"id": "id_A", "name": "A", "parents": []},
-                        {"id": "id_B", "name": "B", "parents": ["id_A"]},
-                        {"id": "id_C", "name": "C", "parents": ["id_B"]}
-                    ]
-                }
-            else:
-                 mock_request.execute.return_value = {"files": []}
-
-            return mock_request
-
-        self.mock_files.list.side_effect = list_side_effect
-
-        result = manager._drive_resolve_path(self.mock_service, path)
-
-        self.assertEqual(result, "id_C")
-        # It should be 1 call
-        self.assertEqual(self.mock_files.list.call_count, 1)
-
-    def test_path_not_found(self):
-        """Should return None if path is incomplete."""
-        path = "A/B/Missing"
-
-        def list_side_effect(**kwargs):
-            q = kwargs.get('q', '')
-            mock_request = MagicMock()
-            if "name = 'A'" in q:
-                 mock_request.execute.return_value = {
-                    "files": [
-                        {"id": "id_A", "name": "A", "parents": []},
-                        {"id": "id_B", "name": "B", "parents": ["id_A"]},
-                        # C is missing from result or Missing is missing
-                    ]
-                }
-            else:
-                 mock_request.execute.return_value = {"files": []}
-            return mock_request
-
-        self.mock_files.list.side_effect = list_side_effect
-        result = manager._drive_resolve_path(self.mock_service, path)
-        self.assertIsNone(result)
-
-    def test_broken_chain(self):
-        """Should return None if parent-child relationship is broken."""
-        path = "A/B"
-
-        def list_side_effect(**kwargs):
-            mock_request = MagicMock()
-            # Both A and B exist, but B is not child of A
-            mock_request.execute.return_value = {
-                "files": [
-                    {"id": "id_A", "name": "A", "parents": []},
-                    {"id": "id_B", "name": "B", "parents": ["id_Other"]},
-                ]
-            }
-            return mock_request
-
-        self.mock_files.list.side_effect = list_side_effect
-        result = manager._drive_resolve_path(self.mock_service, path)
-        self.assertIsNone(result)
-
-    def test_duplicate_folder_names(self):
-        """Should resolve correct path when folder names are duplicated."""
-        path = "A/B"
-
-        def list_side_effect(**kwargs):
-            mock_request = MagicMock()
-            # Scenario:
-            # - Folder A1 (id=id_A1) at root
-            # - Folder A2 (id=id_A2) at root
-            # - Folder B1 (id=id_B1) inside A2
-            # Greedy algorithm might pick A1, find no B inside, and fail.
-            # Correct algorithm picks both A1 and A2, finds B1 inside A2, and succeeds with B1.
-
-            mock_request.execute.return_value = {
-                "files": [
-                    {"id": "id_A1", "name": "A", "parents": []},
-                    {"id": "id_A2", "name": "A", "parents": []},
-                    {"id": "id_B1", "name": "B", "parents": ["id_A2"]},
-                ]
-            }
-            return mock_request
-
-        self.mock_files.list.side_effect = list_side_effect
-        result = manager._drive_resolve_path(self.mock_service, path)
-        self.assertEqual(result, "id_B1")
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

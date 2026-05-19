@@ -22,12 +22,12 @@ from typing import Any
 import pytz
 import requests
 from dateutil import parser as dtparser
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+# SPEC-GAUTH-001 v2.0.0 (#323/#324): clickup-manager no longer mints Google OAuth
+# credentials. Calendar access goes through openclaw-mcp-google via skills/lib/mcp_google.py.
 
 # Add shared lib to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'lib'))
-from google_clients import get_credentials
+import mcp_google
 
 # ── Logging ──────────────────────────────────────────────────────────
 
@@ -396,33 +396,31 @@ DEFAULT_EFFORT_MS = 45 * 60 * 1000  # 45 minutes
 SLOT_BUFFER_MINS = 5
 
 
-def _gcal_authenticate() -> Credentials:
-    """Build Google OAuth2 credentials from GOOGLE_TOKEN_JSON env var."""
-    scopes = ["https://www.googleapis.com/auth/calendar"]
-    return get_credentials(scopes)
-
-
-def _gcal_service():
-    return build("calendar", "v3", credentials=_gcal_authenticate(), cache_discovery=False)
-
-
-def _fetch_calendar_events(cal_svc, day_start: datetime, day_end: datetime) -> list[dict]:
-    """Fetch Google Calendar events for a time window."""
-    result = cal_svc.events().list(
-        calendarId=os.environ.get("GOOGLE_CALENDAR_ID", "primary"),
-        timeMin=day_start.isoformat(),
-        timeMax=day_end.isoformat(),
-        singleEvents=True,
-        orderBy="startTime",
-    ).execute()
-    return result.get("items", [])
+def _fetch_calendar_events(day_start: datetime, day_end: datetime) -> list[dict]:
+    """Fetch Google Calendar events for a time window via openclaw-mcp-google."""
+    body = mcp_google.call(
+        "google_calendar_list_events",
+        {
+            "start": day_start.isoformat(),
+            "end": day_end.isoformat(),
+            "calendar_id": os.environ.get("GOOGLE_CALENDAR_ID", "primary"),
+        },
+    )
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        raise RuntimeError(f"MCP Google google_calendar_list_events: {body['error']}")
+    return body.get("events") or []
 
 
 def _parse_event_window(event: dict) -> tuple[datetime, datetime] | None:
-    """Extract start/end datetimes from a calendar event, skipping all-day."""
-    start_raw = event.get("start", {}).get("dateTime")
-    end_raw = event.get("end", {}).get("dateTime")
-    if not start_raw or not end_raw:
+    """Extract start/end datetimes from an MCP calendar event, skipping all-day.
+
+    openclaw-mcp-google returns ``start`` / ``end`` as ISO datetime strings (or
+    YYYY-MM-DD for all-day events). LifeOS scheduling only cares about timed
+    blocks, so we skip anything that doesn't parse with a time component.
+    """
+    start_raw = event.get("start") or ""
+    end_raw = event.get("end") or ""
+    if not start_raw or not end_raw or "T" not in start_raw or "T" not in end_raw:
         return None
     return dtparser.parse(start_raw), dtparser.parse(end_raw)
 
@@ -456,16 +454,14 @@ def plan_day(list_id: str) -> None:
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     tomorrow = today + timedelta(days=1)
 
-    # ── 1. Fetch Google Calendar events ──────────────────────────────
-    log.info("Connecting to Google Calendar…")
+    # ── 1. Fetch Google Calendar events via openclaw-mcp-google ──────
+    log.info("Fetching Google Calendar via openclaw-mcp-google…")
     try:
-        cal_svc = _gcal_service()
-        events = _fetch_calendar_events(cal_svc, today, tomorrow)
+        events = _fetch_calendar_events(today, tomorrow)
         log.info("Fetched %d calendar event(s) for today.", len(events))
     except Exception as exc:
-        log.warning("Google Calendar unavailable — scheduling without conflict check: %s", exc)
+        log.warning("MCP Google Calendar unavailable — scheduling without conflict check: %s", exc)
         events = []
-        cal_svc = None
 
     # ── 2. Define available LifeOS slots (outside 9–5 UK) ───────────
     morning_start = today.replace(hour=5, minute=0)

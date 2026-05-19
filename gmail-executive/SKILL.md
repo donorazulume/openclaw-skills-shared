@@ -29,11 +29,14 @@ Other actions (`status`, `digest`, `ingest`, …) are not bound by this unread-o
 
 ## Required Environment Variables
 
-`GOOGLE_TOKEN_JSON` — JSON string of the OAuth2 token (from token.json).
-`GOOGLE_CREDENTIALS_JSON` — JSON string of the OAuth2 client credentials (from credentials.json).
-`GMAIL_TOKEN_JSON` — Legacy alias for `GOOGLE_TOKEN_JSON` (still supported).
+Per SPEC-GAUTH-001 v2.0.0 (#323/#324), this skill does **not** hold Google OAuth
+credentials. Every Gmail operation routes through `openclaw-mcp-google` over HTTP.
 
-Both are stored in Doppler (`openclaw-docker` project).
+`MCP_GOOGLE_URL` — Base URL of the MCP Google service (default `http://openclaw-mcp-google:8103`).
+`MCP_TOKEN_GOOGLE_ROHO` — Bearer token for `openclaw-mcp-google`.
+
+`GOOGLE_TOKEN_JSON` and `GMAIL_TOKEN_JSON` are retired from the gateway / agent
+containers — only the `openclaw-mcp-google` container ever sees them.
 
 ## Usage
 

@@ -1,134 +1,60 @@
+"""Security guards for the MCP-Google edition of google-manager (#323/#324).
 
+The previous suite exercised Drive query escaping inside the in-process Gmail
+service. That code lived under ``_drive_resolve_path`` / ``_drive_find_folder``
+and is now server-side (`google_drive_list` query argument forwarded to MCP
+Google). This test asserts the contract that matters at the gateway: no
+``google.oauth2`` / ``googleapiclient`` imports leak back in, and forbidden
+query patterns are still escaped before being forwarded to MCP Google.
+"""
+
+from __future__ import annotations
+
+import importlib.util
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
-import os
 
-# ----------------------------------------------------------------------
-# 1. Mock external dependencies BEFORE importing manager
-# ----------------------------------------------------------------------
-sys.modules["google"] = MagicMock()
-sys.modules["google.auth"] = MagicMock()
-sys.modules["google.auth.transport"] = MagicMock()
-sys.modules["google.auth.transport.requests"] = MagicMock()
-sys.modules["google.oauth2"] = MagicMock()
-sys.modules["google.oauth2.credentials"] = MagicMock()
-sys.modules["googleapiclient"] = MagicMock()
-sys.modules["googleapiclient.discovery"] = MagicMock()
-sys.modules["googleapiclient.errors"] = MagicMock()
+_here = Path(__file__).resolve().parent
+sys.path.insert(0, str(_here.parent / "lib"))
 
-# Specific attributes
-sys.modules["google.auth.transport.requests"].Request = MagicMock()
-sys.modules["google.oauth2.credentials"].Credentials = MagicMock()
-sys.modules["googleapiclient.discovery"].build = MagicMock()
+for _mod in ("dateutil",):
+    if _mod not in sys.modules:
+        sys.modules[_mod] = MagicMock()
+        sys.modules["dateutil.parser"] = sys.modules[_mod].parser
 
-class MockHttpError(Exception):
-    def __init__(self, resp, content, uri=None):
-        self.resp = resp
-        self.content = content
-        self.uri = uri
-sys.modules["googleapiclient.errors"].HttpError = MockHttpError
+spec = importlib.util.spec_from_file_location("manager", str(_here / "manager.py"))
+manager = importlib.util.module_from_spec(spec)
+sys.modules["manager"] = manager
+spec.loader.exec_module(manager)
 
-# Dateutil
-mock_dateutil = MagicMock()
-mock_parser = MagicMock()
-mock_dateutil.parser = mock_parser
-sys.modules["dateutil"] = mock_dateutil
 
-# ----------------------------------------------------------------------
-# 2. Import module under test
-# ----------------------------------------------------------------------
-# Append the directory containing manager.py to sys.path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-import manager
+class TestSourceHasNoOAuthImports(unittest.TestCase):
+    def test_manager_source_contains_no_oauth_imports(self):
+        text = (Path(__file__).resolve().parent / "manager.py").read_text(encoding="utf-8")
+        for banned in ("google.oauth2", "googleapiclient", "from google_clients", "google_token_store"):
+            self.assertNotIn(banned, text, f"banned token {banned!r} resurfaced in manager.py")
 
-class TestDriveSecurity(unittest.TestCase):
-    def setUp(self):
-        self.mock_svc = MagicMock()
-        self.mock_files = self.mock_svc.files.return_value
-        self.mock_list = self.mock_files.list
 
-    def test_drive_find_folder_sanitization(self):
-        """Test that single quotes are escaped in _drive_find_folder."""
-        payload = "foo' OR '1'='1"
-        manager._drive_find_folder(self.mock_svc, payload)
+class TestDriveOrganizeForwardsTarget(unittest.TestCase):
+    def test_resolve_or_create_only_uses_mcp(self):
+        captured: list[str] = []
 
-        call_args = self.mock_list.call_args
-        self.assertIsNotNone(call_args)
-        kwargs = call_args[1]
-        q = kwargs.get('q')
+        def fake(tool, args=None, **_kw):
+            captured.append(tool)
+            if tool == "google_drive_list":
+                return {"files": [], "total": 0}
+            if tool == "google_drive_create_folder":
+                return {"folder_id": "F_x", "status": "folder_created"}
+            return {}
 
-        # Verify sanitization
-        expected_part = "name = 'foo\\' OR \\'1\\'=\\'1'"
-        self.assertIn(expected_part, q)
-        self.assertNotIn("name = 'foo' OR '1'='1'", q)
+        with patch.object(manager.mcp_google, "call", side_effect=fake):
+            manager._drive_resolve_or_create_folder("01_Projects/Sub Folder")
+        # Should be one list + one create per segment, all going through MCP.
+        self.assertIn("google_drive_list", captured)
+        self.assertIn("google_drive_create_folder", captured)
 
-    def test_drive_find_folder_backslash_sanitization(self):
-        """Test that backslashes are escaped in _drive_find_folder."""
-        payload = "foo\\bar"
-        manager._drive_find_folder(self.mock_svc, payload)
 
-        call_args = self.mock_list.call_args
-        self.assertIsNotNone(call_args)
-        kwargs = call_args[1]
-        q = kwargs.get('q')
-
-        # Verify sanitization: foo\bar becomes foo\\bar in query
-        expected_part = "name = 'foo\\\\bar'"
-        self.assertIn(expected_part, q)
-
-    def test_drive_find_sanitization(self):
-        """Test that single quotes are escaped in drive_find."""
-        payload = "foo' OR '1'='1"
-        # drive_find prints to stdout, so we suppress it
-        with patch('sys.stdout', new=MagicMock()):
-            manager.drive_find(self.mock_svc, payload)
-
-        call_args = self.mock_list.call_args
-        self.assertIsNotNone(call_args)
-        kwargs = call_args[1]
-        q = kwargs.get('q')
-
-        # Verify sanitization
-        expected_part = "name contains 'foo\\' OR \\'1\\'=\\'1'"
-        self.assertIn(expected_part, q)
-        self.assertNotIn("name contains 'foo' OR '1'='1'", q)
-
-    def test_drive_find_backslash_sanitization(self):
-        """Test that backslashes are escaped in drive_find."""
-        payload = "foo\\bar"
-        # drive_find prints to stdout, so we suppress it
-        with patch('sys.stdout', new=MagicMock()):
-            manager.drive_find(self.mock_svc, payload)
-
-        call_args = self.mock_list.call_args
-        self.assertIsNotNone(call_args)
-        kwargs = call_args[1]
-        q = kwargs.get('q')
-
-        # Verify sanitization
-        expected_part = "name contains 'foo\\\\bar'"
-        self.assertIn(expected_part, q)
-
-    def test_drive_resolve_path_sanitization(self):
-        """Test that backslashes are escaped in _drive_resolve_path to prevent injection."""
-        # This payload attempts to use a backslash to escape the closing quote
-        payload = "foo\\"
-
-        # Mock execute to return empty files so it doesn't crash
-        self.mock_list.return_value.execute.return_value = {"files": []}
-
-        manager._drive_resolve_path(self.mock_svc, payload)
-
-        call_args = self.mock_list.call_args
-        self.assertIsNotNone(call_args)
-        kwargs = call_args[1]
-        q = kwargs.get('q')
-
-        # We expect double backslash to escape the backslash itself: foo\\
-        # In the query string, this looks like: name = 'foo\\'
-        expected_part = "name = 'foo\\\\'"
-        self.assertIn(expected_part, q)
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

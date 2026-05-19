@@ -23,7 +23,6 @@ Environment variables:
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import hmac as hmac_mod
 import json
@@ -447,50 +446,24 @@ def post_approval_request(txn: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-# ── Email body extraction ────────────────────────────────────────────
-
-
-def _extract_email_body(payload: dict[str, Any]) -> tuple[str, str]:
-    """Return *(body_text, mime_type)* from a Gmail message payload."""
-    body_data = payload.get("body", {}).get("data")
-    if body_data:
-        return (
-            base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace"),
-            payload.get("mimeType", "text/plain"),
-        )
-
-    plain = html = ""
-    for part in payload.get("parts", []):
-        mime = part.get("mimeType", "")
-        data = part.get("body", {}).get("data", "")
-        if not data:
-            for nested in part.get("parts", []):
-                nd = nested.get("body", {}).get("data", "")
-                if nd:
-                    decoded = base64.urlsafe_b64decode(nd).decode("utf-8", errors="replace")
-                    if nested.get("mimeType") == "text/plain":
-                        plain = decoded
-                    elif "html" in nested.get("mimeType", ""):
-                        html = decoded
-            continue
-        decoded = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
-        if mime == "text/plain":
-            plain = decoded
-        elif "html" in mime:
-            html = decoded
-
-    if plain:
-        return plain, "text/plain"
-    if html:
-        return html, "text/html"
-    return "", "text/plain"
+# Body decoding is now handled by openclaw-mcp-google's google_mail_read tool,
+# which returns plaintext (or HTML stripped to plaintext) for the message body.
+# The legacy Gmail MIME walker that lived here has been removed (#323/#324).
 
 
 # ── Ingestion ────────────────────────────────────────────────────────
 
 
-def ingest_emails(service: Any, limit: int = 10) -> list[dict[str, Any]]:
-    """Fetch, preprocess, and structure new emails for agent consumption."""
+def ingest_emails(limit: int = 10) -> list[dict[str, Any]]:
+    """Fetch, preprocess, and structure new INBOX emails for agent consumption.
+
+    Reads from openclaw-mcp-google over HTTP (SPEC-GAUTH-001 revised / #323) —
+    no Gmail credentials are minted in this process. The high-water mark is kept
+    by Gmail message ID instead of historyId because the MCP search tool returns
+    only stub fields; messages already seen in a previous run are skipped.
+    """
+    import mcp_google  # local import; gateway-only env
+
     hwm_file = DATA_DIR / "email_hwm.json"
     hwm: dict[str, Any] = {}
     if hwm_file.exists():
@@ -499,37 +472,45 @@ def ingest_emails(service: Any, limit: int = 10) -> list[dict[str, Any]]:
         except (json.JSONDecodeError, OSError):
             pass
 
-    last_hid = hwm.get("history_id")
+    seen_ids: set[str] = set(hwm.get("seen_message_ids") or [])
 
-    results = service.users().messages().list(
-        userId="me", labelIds=["INBOX"], maxResults=limit,
-    ).execute()
-    messages = results.get("messages", [])
-    if not messages:
+    try:
+        search_body = mcp_google.call(
+            "google_mail_search",
+            {"query": "in:inbox", "max_results": limit},
+        )
+    except mcp_google.GoogleMCPError as exc:
+        print(json.dumps({"status": "error", "error_code": "MCP_GOOGLE_UNREACHABLE", "message": str(exc)}))
+        return []
+
+    stubs = (search_body or {}).get("messages") or []
+    if not stubs:
         print(json.dumps({"status": "ok", "ingested": 0, "message": "No new messages"}))
         return []
 
     ingested: list[dict[str, Any]] = []
-    new_hid = last_hid
     total_raw = total_clean = 0
+    new_seen: list[str] = []
 
-    for stub in messages:
-        msg = service.users().messages().get(userId="me", id=stub["id"], format="full").execute()
-
-        hid = msg.get("historyId")
-        if hid and (not new_hid or int(hid) > int(new_hid)):
-            new_hid = hid
-        if last_hid and hid and int(hid) <= int(last_hid):
+    for stub in stubs:
+        msg_id = stub.get("id", "")
+        if not msg_id or msg_id in seen_ids:
+            continue
+        try:
+            msg = mcp_google.call("google_mail_read", {"message_id": msg_id})
+        except mcp_google.GoogleMCPError as exc:
+            log.warning("ingest: read failed for %s: %s", msg_id, exc)
+            continue
+        if not isinstance(msg, dict) or msg.get("error"):
             continue
 
-        hdrs = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
-        sender = hdrs.get("from", "unknown")
-        date_str = hdrs.get("date", "")
-        subject = hdrs.get("subject", "(no subject)")
-        thread_id = msg.get("threadId", "")
-
-        raw_body, ctype = _extract_email_body(msg.get("payload", {}))
-        cleaned, raw_tok, clean_tok = preprocess_email(raw_body, ctype)
+        sender = msg.get("from", "unknown")
+        subject = msg.get("subject", "(no subject)")
+        date_str = msg.get("date", "")
+        thread_id = msg.get("thread_id", "")
+        raw_body = msg.get("body", "") or msg.get("snippet", "")
+        # google_mail_read returns plaintext where possible; treat as text/plain.
+        cleaned, raw_tok, clean_tok = preprocess_email(raw_body, "text/plain")
         total_raw += raw_tok
         total_clean += clean_tok
 
@@ -544,7 +525,7 @@ def ingest_emails(service: Any, limit: int = 10) -> list[dict[str, Any]]:
         ingested.append({
             "transaction_id": txn["transaction_id"],
             "thread_id": thread_id,
-            "message_id": msg["id"],
+            "message_id": msg_id,
             "sender": sender,
             "subject": subject,
             "formatted": formatted,
@@ -552,9 +533,11 @@ def ingest_emails(service: Any, limit: int = 10) -> list[dict[str, Any]]:
             "clean_tokens": clean_tok,
         })
         _counters["agent.email.ingested"] += 1
+        new_seen.append(msg_id)
 
-    if new_hid:
-        hwm["history_id"] = str(new_hid)
+    if new_seen:
+        merged = (list(seen_ids) + new_seen)[-1000:]
+        hwm["seen_message_ids"] = merged
         hwm["updated_at"] = datetime.now(timezone.utc).isoformat()
         hwm_file.parent.mkdir(parents=True, exist_ok=True)
         hwm_file.write_text(json.dumps(hwm))
@@ -580,7 +563,6 @@ def ingest_emails(service: Any, limit: int = 10) -> list[dict[str, Any]]:
 
 
 def send_gated(
-    service: Any,
     to: list[str],
     subject: str,
     body_markdown: str,
@@ -592,7 +574,8 @@ def send_gated(
 
     Internal emails are auto-approved.  External emails require HITL approval
     via Mattermost unless the recipients are whitelisted and *bypass_approval*
-    is True.
+    is True. All Gmail transport now flows through openclaw-mcp-google
+    (SPEC-GAUTH-001 revised / #323).
     """
     from triage import send_email as gmail_send
 
@@ -638,7 +621,7 @@ def send_gated(
     # ── Internal → auto-approve ──────────────────────────────────────
     if domain_class == "internal":
         update_transaction(txn_id, "APPROVED", actor="system:auto-approve-internal")
-        send_result = gmail_send(service, to, subject, body_markdown, cc=cc, _quiet=True)
+        send_result = gmail_send(to, subject, body_markdown, cc=cc, _quiet=True)
         if send_result.get("status") == "success":
             update_transaction(txn_id, "SENT", actor="system")
             _counters["agent.email.sent"] += 1
@@ -661,7 +644,7 @@ def send_gated(
     # ── External + whitelisted + bypass flag ─────────────────────────
     if bypass_approval and is_whitelisted(all_recipients):
         update_transaction(txn_id, "APPROVED", actor="system:whitelist-bypass")
-        send_result = gmail_send(service, to, subject, body_markdown, cc=cc, _quiet=True)
+        send_result = gmail_send(to, subject, body_markdown, cc=cc, _quiet=True)
         if send_result.get("status") == "success":
             update_transaction(txn_id, "SENT", actor="system")
             _counters["agent.email.sent"] += 1
@@ -701,7 +684,6 @@ def send_gated(
 
 
 def finalize(
-    service: Any,
     txn_id: str,
     decision: str,
     actor: str = "admin",
@@ -729,7 +711,7 @@ def finalize(
     if decision == "approve":
         update_transaction(txn_id, "APPROVED", actor=f"human:{actor}", approval_user=actor)
         send_result = gmail_send(
-            service, txn["to"], txn["subject"], txn["body_markdown"],
+            txn["to"], txn["subject"], txn["body_markdown"],
             cc=txn.get("cc"), _quiet=True,
         )
         if send_result.get("status") == "success":
@@ -822,12 +804,8 @@ def main() -> None:
         show_status()
         return
 
-    from triage import _authenticate, _service
-    creds = _authenticate()
-    service = _service(creds)
-
     if args.action == "ingest":
-        ingest_emails(service, limit=args.limit)
+        ingest_emails(limit=args.limit)
 
     elif args.action == "send-gated":
         if not args.to:
@@ -840,7 +818,7 @@ def main() -> None:
         to_list = [a.strip() for a in args.to.split(",") if a.strip()]
         cc_list = [a.strip() for a in (args.cc or "").split(",") if a.strip()]
         send_gated(
-            service, to_list, args.subject, body,
+            to_list, args.subject, body,
             cc=cc_list, thread_id=args.thread_id,
             bypass_approval=args.bypass_approval,
         )
@@ -850,7 +828,7 @@ def main() -> None:
             parser.error("--transaction-id is required")
         if not args.decision:
             parser.error("--decision is required")
-        finalize(service, args.transaction_id, args.decision, reason=args.reason)
+        finalize(args.transaction_id, args.decision, reason=args.reason)
 
 
 if __name__ == "__main__":

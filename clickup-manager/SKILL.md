@@ -176,7 +176,7 @@ Never ask the user for an ID you can look up. Use discovery and search first.
 * `CLICKUP_API_KEY` — Required for API access (stored in Doppler).
 * `CLICKUP_TEAM_ID` — Workspace ID (auto-detected if not set).
 * `CLICKUP_LIST_ID` — Primary LifeOS Inbox/Task list for plan-day.
-* `GOOGLE_TOKEN_JSON` — OAuth2 token for Google Calendar (stored in Doppler).
+* `MCP_GOOGLE_URL` / `MCP_TOKEN_GOOGLE_ROHO` — Calendar conflicts are fetched from `openclaw-mcp-google` (#323/#324). No local Google OAuth credentials are used.
 * `GOOGLE_CALENDAR_ID` — Calendar to check for conflicts (default: `primary`).
 * `TIMEZONE` — Scheduling timezone (default: `Europe/London`).
 

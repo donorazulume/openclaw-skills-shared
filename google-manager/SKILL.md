@@ -14,10 +14,11 @@ Use this skill to read/send emails, manage calendar events, and organize Drive f
 
 ## Required Environment Variables
 
-`GOOGLE_TOKEN_JSON` — OAuth2 token JSON (contents of token.json) with Gmail + Calendar + Drive scopes.
-`GOOGLE_CREDENTIALS_JSON` — OAuth2 client credentials JSON (contents of credentials.json).
+Per SPEC-GAUTH-001 v2.0.0 (#323/#324) all Google operations go through
+`openclaw-mcp-google`. This skill no longer holds OAuth credentials.
 
-Both are stored in Doppler (`openclaw-docker` project).
+`MCP_GOOGLE_URL` — Base URL (default `http://openclaw-mcp-google:8103`).
+`MCP_TOKEN_GOOGLE_ROHO` — Bearer token for `openclaw-mcp-google` (Doppler-injected).
 
 ## Usage
 

@@ -3,12 +3,16 @@ from unittest.mock import patch, MagicMock, call
 import sys
 import os
 
+# SPEC-GAUTH-001 v2.0.0 (#323/#324): clickup-manager no longer imports Google
+# OAuth libraries — Calendar reads come from openclaw-mcp-google. We still mock
+# `requests`, `pytz`, and `dateutil` so the local pytest env can collect the
+# module even when those system packages aren't installed.
 sys.modules['requests'] = MagicMock()
-sys.modules['google.auth.transport.requests'] = MagicMock()
 sys.modules['pytz'] = MagicMock()
 sys.modules['dateutil'] = MagicMock()
-sys.modules['google.oauth2.credentials'] = MagicMock()
-sys.modules['googleapiclient.discovery'] = MagicMock()
+# `manager` imports `mcp_google` from the sibling `lib/` folder; add it to path.
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+sys.modules['mcp_google'] = MagicMock()
 
 # Add the directory to sys.path to import manager
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
