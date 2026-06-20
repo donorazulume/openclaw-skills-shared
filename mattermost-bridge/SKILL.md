@@ -132,6 +132,14 @@ Attach a file to a task dispatch:
 python3 {baseDir}/bridge.py --action dispatch --channel coordination --recipient amara --priority high --message "Lease document for review." --file-path /tmp/lease.pdf
 ```
 
+## Edit a post (in-place correction)
+
+Use this action to update the message text of an existing post instead of deleting and reposting it.
+
+```bash
+python3 {baseDir}/bridge.py --action edit --post-id "abc123def456" --message "This is the updated message content."
+```
+
 ## Upload files without posting
 
 Use `--action upload` to pre-upload files and get `file_id` values without creating a post:

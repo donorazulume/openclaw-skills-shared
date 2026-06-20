@@ -36,6 +36,20 @@ import requests
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("mattermost-bridge")
 
+
+def _escape_dollars(message: str) -> str:
+    """Escapes literal $ signs as \\$ in markdown text outside of code blocks,
+    unless they are already escaped. Prevents LaTeX math delimiters parsing in Mattermost.
+    """
+    if not message:
+        return message
+    # Split the message by fenced (```...```) or inline (`...`) code blocks
+    code_pattern = re.compile(r'(```.*?```|`[^`]*`)', re.DOTALL)
+    parts = code_pattern.split(message)
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r'(?<!\\)\$', r'\\$', parts[i])
+    return "".join(parts)
+
 MM_URL = os.environ.get("MATTERMOST_URL", "http://mattermost:8065")
 MM_TOKEN = os.environ.get("MATTERMOST_BOT_TOKEN", "")
 # Issue #195: multi-team servers — pin resolution so #agent-amara etc. map to the intended team
@@ -470,9 +484,10 @@ def cmd_post(args: argparse.Namespace) -> None:
     upload_result = _handle_file_uploads(channel_id, args.file_path, args.auto_join)
     file_ids = upload_result["file_ids"] if upload_result and "file_ids" in upload_result else []
 
+    escaped_message = _escape_dollars(args.message)
     payload: dict[str, Any] = {
         "channel_id": channel_id,
-        "message": args.message,
+        "message": escaped_message,
     }
     if file_ids:
         payload["file_ids"] = file_ids
@@ -578,9 +593,10 @@ def cmd_dm(args: argparse.Namespace) -> None:
     upload_result = _handle_file_uploads(channel_id, args.file_path, args.auto_join)
     file_ids = upload_result["file_ids"] if upload_result and "file_ids" in upload_result else []
 
+    escaped_message = _escape_dollars(args.message)
     payload: dict[str, Any] = {
         "channel_id": channel_id,
-        "message": args.message,
+        "message": escaped_message,
     }
     if file_ids:
         payload["file_ids"] = file_ids
@@ -624,11 +640,12 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
     file_ids = upload_result["file_ids"] if upload_result and "file_ids" in upload_result else []
 
     task_id = args.task_id or f"TASK-{uuid.uuid4().hex[:8].upper()}"
+    escaped_payload = _escape_dollars(args.message)
     dispatch_payload: dict[str, Any] = {
         "sender": AGENT_NAME,
         "recipient": args.recipient,
         "task_id": task_id,
-        "payload": args.message,
+        "payload": escaped_payload,
         "priority": args.priority,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -638,7 +655,7 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
     message = (
         f"**Task Dispatch** → @{args.recipient}\n"
         f"Priority: **{args.priority}**\n\n"
-        f"{args.message}\n\n"
+        f"{escaped_payload}\n\n"
         f"```json\n{json.dumps(dispatch_payload, indent=2)}\n```"
     )
 
@@ -711,10 +728,11 @@ def cmd_thread(args: argparse.Namespace) -> None:
     upload_result = _handle_file_uploads(channel_id, args.file_path, args.auto_join)
     file_ids = upload_result["file_ids"] if upload_result and "file_ids" in upload_result else []
 
+    escaped_message = _escape_dollars(args.message)
     payload: dict[str, Any] = {
         "channel_id": channel_id,
         "root_id": root_id,
-        "message": args.message,
+        "message": escaped_message,
     }
     if file_ids:
         payload["file_ids"] = file_ids
@@ -730,6 +748,24 @@ def cmd_thread(args: argparse.Namespace) -> None:
         log.info("Thread reply with %d file(s) attached", len(file_ids))
 
     print(json.dumps(result, indent=2))
+
+
+def cmd_edit(args: argparse.Namespace) -> None:
+    """Edit an existing post's message content (in-place correction)."""
+    if not args.post_id:
+        print(json.dumps({"error": "--post-id is required for edit"}))
+        sys.exit(1)
+    if not args.message:
+        print(json.dumps({"error": "--message is required for edit"}))
+        sys.exit(1)
+
+    escaped_message = _escape_dollars(args.message)
+    payload = {
+        "id": args.post_id,
+        "message": escaped_message,
+    }
+    result = _api("PUT", f"/posts/{args.post_id}", payload)
+    print(json.dumps(result, indent=2, default=str))
 
 
 def cmd_upload(args: argparse.Namespace) -> None:
@@ -802,7 +838,7 @@ def main() -> None:
     parser.add_argument("--action", required=True,
                         choices=[
                             "post", "read", "thread", "dispatch", "channels", "health",
-                            "join", "resolve-user", "dm", "react", "upload",
+                            "join", "resolve-user", "dm", "react", "upload", "edit",
                         ])
     parser.add_argument("--channel", default="coordination")
     parser.add_argument("--message", default="")
@@ -851,6 +887,7 @@ def main() -> None:
         "dm": cmd_dm,
         "react": cmd_react,
         "upload": cmd_upload,
+        "edit": cmd_edit,
     }
     actions[args.action](args)
 
