@@ -457,7 +457,7 @@ def main() -> None:
                     "query": args.query,
                     "collection": name,
                     "n_results": args.n_results,
-                    "where_filter": where,
+                    "where_filter": where or {},
                     "search_mode": args.search_mode,
                     "semantic_weight": args.semantic_weight,
                 }
@@ -490,7 +490,7 @@ def main() -> None:
                 "query": args.query,
                 "collection": collection_name,
                 "n_results": args.n_results,
-                "where_filter": where,
+                "where_filter": where or {},
                 "search_mode": args.search_mode,
                 "semantic_weight": args.semantic_weight,
             }
@@ -733,7 +733,7 @@ def main() -> None:
                 "query": args.text_query,
                 "collection": collection_name,
                 "n_results": cap_n * 3,
-                "where_filter": where_dict,
+                "where_filter": where_dict or {},
                 "search_mode": args.search_mode,
                 "semantic_weight": args.semantic_weight,
             }
