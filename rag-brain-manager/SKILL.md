@@ -1,7 +1,7 @@
 ---
 name: rag-brain-manager
 description: Synchronizes, queries, and manages Roho's multi-collection ChromaDB knowledge base with hybrid search, pluggable embeddings, and benchmarking.
-metadata: {"openclaw":{"requires":{"bins":["python3"]},"emoji":"🧠"}}
+metadata: {"openclaw":{"requires":{"bins":["python3"]},"emoji":"🧠","skillVersion":"1.1.0"}}
 ---
 
 Manages the ChromaDB vector database (Central Brain). Supports two modes:
@@ -11,7 +11,14 @@ Manages the ChromaDB vector database (Central Brain). Supports two modes:
 
 Supports multiple named collections — each collection is a separate knowledge domain (e.g. `letters`, `mortgages`, `projects`).
 
-Supports pluggable embedding models, hybrid search (semantic + BM25 keyword), cross-encoder reranking, and embedding benchmarking (SPEC-RAG-001).
+Supports pluggable embedding models, hybrid search (semantic + BM25 keyword), cross-encoder reranking, and embedding benchmarking (SPEC-RAG-001). **SPEC-RAG-003:** routine retrieval should prefer **`openbrain-client --action smart-query`** against the MCP server so governance + compression apply; **SPEC-RAG-004:** optional **`--expand-query`** lives on **`openbrain-client`** (not this skill) — `rag-brain-manager` talks to Chroma directly and does not run the LLM rewriter. Direct **`rag-brain-manager`** remains for operator/Chroma maintenance.
+
+**Issue #309:** Shared logic lives in **`packages/openclaw_skills/openclaw_skills/rag_brain_manager.py`**; this skill’s **`manager.py`** bootstraps `sys.path` and delegates — sync **`packages/openclaw_skills`** whenever you sync **`skills/`** / **`skills-amara/`**.
+
+## Issue #300 — hostname and bare `chromadb` clients
+
+- **Hostname:** **`rag-brain`** (never assume the service is named `chromadb` in Compose).
+- **Do not** use raw `chromadb.HttpClient(...)` against `rag-brain:8000` without the same embedding pipeline as MCP / `rag-brain-manager`; the default ONNX mini-LM embeddings are **384-d** while `open_brain` expects **768-d** (`nomic-embed-text-v1.5`). See **[docs/open-brain-chroma-query-paths.md](../../docs/open-brain-chroma-query-paths.md)**.
 
 ## Workflow
 
@@ -62,6 +69,14 @@ Collection names: 3–63 chars, alphanumeric/hyphen/underscore, must start and e
 ### Embedding Management
 - **benchmark**: Evaluate embedding models against a curated JSONL test set. Computes NDCG@5, MRR@5, Recall@5 per model.
 - **re-embed**: Migrate a collection to a new embedding model without data loss.
+
+### Findings (SPEC-SYSADMIN-002.1)
+
+Structured `roho_review` rows in `open_brain` — one Chroma document per finding, canonical text ≤600 chars.
+
+- **upsert-finding**: `--repo donorazulume/openclaw-docker --finding-json '{...}' --run-id ULID --week-iso 2026-W19 [--issue-url URL] [--fingerprint ...]`
+- **mark-status**: `--fingerprint <12c> --mark-to-status fixed|wontfix|false-positive|open|filed --reason "closed on GitHub"` (never deletes embeddings)
+- **query-findings**: `--where '{"source":"roho_review","repo":"donorazulume/openclaw-rob"}' --since-weeks 8 --n-results 30 [--text-query "optional semantic"]`
 
 ### Maintenance
 - **optimize**: Deduplicate chunks by content hash within a collection. Supports `--dry-run`.
@@ -218,8 +233,8 @@ python3 {baseDir}/manager.py --action restore --backup-timestamp 20260307T120000
 
 | Model ID | Type | Dimensions | Notes |
 |---|---|---|---|
-| `gemini-embedding-001` | API (Gemini) | 768 | Default. Uses `GEMINI_API_KEY`. |
-| `nomic-embed-text-v1.5` | Local (HuggingFace) | 768 | CPU inference. Good general-purpose. |
+| `nomic-embed-text-v1.5` | Local (HuggingFace) | 768 | Default. CPU inference. Good general-purpose. |
+| `gemini-embedding-001` | API (Gemini) | 768 | Deprecated fallback. Uses `GEMINI_API_KEY`. |
 | `bge-large-en-v1.5` | Local (HuggingFace) | 1024 | CPU inference. BAAI model. |
 | `snowflake-arctic-embed-l` | Local (HuggingFace) | 1024 | CPU inference. Strong retrieval benchmarks. |
 
