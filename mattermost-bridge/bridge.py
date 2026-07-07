@@ -33,6 +33,22 @@ from urllib.parse import quote
 
 import requests
 
+# Resolve lib path dynamically for imports
+_SELF_DIR = Path(__file__).resolve().parent
+_LIB_DIR = _SELF_DIR.parent / "lib"
+if _LIB_DIR.exists():
+    sys.path.insert(0, str(_LIB_DIR))
+else:
+    for p in ["/home/node/.openclaw/skills/lib", "/home/node/amara/.openclaw/skills/lib", "/home/node/rob/.openclaw/skills/lib"]:
+        if os.path.exists(p):
+            sys.path.insert(0, p)
+            break
+
+try:
+    import mcp_comms
+except ImportError:
+    mcp_comms = None
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("mattermost-bridge")
 
@@ -81,10 +97,20 @@ def _api(
     path: str,
     payload: Optional[Any] = None,
 ) -> dict[str, Any]:
-    """Call Mattermost REST API. Returns parsed JSON or error dict.
+    """Call Mattermost REST API via Comms MCP request proxy, or direct if fallback is needed."""
+    if mcp_comms:
+        try:
+            # Clean path to make sure it doesn't duplicate /api/v4 prefix
+            clean_path = path
+            if clean_path.startswith("/api/v4"):
+                clean_path = clean_path[7:]
+            # Comms MCP request expects method, path, payload
+            return mcp_comms.request(method, clean_path, payload)
+        except Exception as exc:
+            log.error("MCP_COMM_ERROR: Comms MCP proxy call failed: %s", exc)
+            return {"error": "MCP_COMM_ERROR", "detail": str(exc)}
 
-    `payload` may be a dict (object) or a list (e.g. direct-channel creation).
-    """
+    # Fallback to direct requests if mcp_comms is not available
     url = f"{MM_URL}/api/v4{path}"
     try:
         resp = requests.request(
@@ -101,7 +127,7 @@ def _api(
                     "403 often means the bot is not a channel member (join the channel first), "
                     "or the channel is private and an admin must invite the bot. "
                     "Try: --action join --channel <name>, post/react with default auto-join, "
-                    "or see docs/MATTERMOST-TROUBLESHOOTING.md."
+                    "or see docs/MATTERMOST-TROUBLEOUTING.md."
                 )
             return err
         return resp.json() if resp.text else {"status": "ok"}
@@ -111,6 +137,7 @@ def _api(
     except requests.Timeout:
         log.error("ERR_COMM_FALLBACK: Mattermost request timed out")
         return {"error": "ERR_COMM_FALLBACK", "detail": "timeout"}
+
 
 
 _channel_cache: dict[str, str] = {}
@@ -248,12 +275,7 @@ def _validate_file_path(file_path: str) -> Optional[dict[str, Any]]:
 
 
 def _upload_file(channel_id: str, file_path: str) -> dict[str, Any]:
-    """Upload a single file to Mattermost via POST /api/v4/files (REQ-MMATT-002).
-
-    Returns:
-        On success: {"file_id": str, "filename": str, "size": int, "mime_type": str}
-        On error:   {"error": str, "detail": str, "file": str}
-    """
+    """Upload a single file to Mattermost via Comms MCP upload proxy, or direct fallback."""
     # Validate
     err = _validate_file_path(file_path)
     if err:
@@ -267,6 +289,36 @@ def _upload_file(channel_id: str, file_path: str) -> dict[str, Any]:
 
     log.info("Uploading %s (%d bytes) to channel %s...", filename, size, channel_id)
 
+    if mcp_comms:
+        try:
+            with open(resolved, "rb") as f:
+                import base64
+                file_bytes_b64 = base64.b64encode(f.read()).decode("utf-8")
+            body = {
+                "channel_id": channel_id,
+                "filename": filename,
+                "mime_type": mime_type,
+                "file_bytes_b64": file_bytes_b64,
+            }
+            res = mcp_comms.call("api/comms/upload", body)
+            if "error" in res:
+                return res
+            file_infos = res.get("file_infos", [])
+            if not file_infos:
+                return {"error": "NO_FILE_INFO", "detail": "Upload succeeded but no file_infos returned", "file": file_path}
+            fi = file_infos[0]
+            log.info("Uploaded %s → file_id=%s", filename, fi["id"])
+            return {
+                "file_id": fi["id"],
+                "filename": fi.get("name", filename),
+                "size": fi.get("size", size),
+                "mime_type": fi.get("mime_type", mime_type),
+            }
+        except Exception as exc:
+            log.error("MCP_COMM_ERROR: Comms MCP file upload failed: %s", exc)
+            return {"error": "MCP_COMM_ERROR", "detail": str(exc), "file": file_path}
+
+    # Fallback path if mcp_comms is not available
     url = f"{MM_URL}/api/v4/files?channel_id={channel_id}"
     try:
         with open(resolved, "rb") as f:
@@ -723,6 +775,9 @@ def cmd_thread(args: argparse.Namespace) -> None:
 
     root_id = post.get("root_id") or post.get("id")
     channel_id = post.get("channel_id")
+    if not isinstance(channel_id, str):
+        print(json.dumps({"error": f"Parent post {args.post_id} does not have a valid channel_id"}))
+        sys.exit(1)
 
     # Upload files using the parent post's channel_id (REQ-MMATT-005)
     upload_result = _handle_file_uploads(channel_id, args.file_path, args.auto_join)
@@ -866,6 +921,11 @@ def main() -> None:
         help="Reaction short name or emoji (e.g. +1, 👍, white_check_mark) for react action",
     )
     parser.add_argument(
+        "--message-file",
+        default="",
+        help="Path to a file containing the message to post/send",
+    )
+    parser.add_argument(
         "--file-path",
         nargs="+",
         default=[],
@@ -874,6 +934,14 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    if args.message_file:
+        try:
+            with open(args.message_file, "r", encoding="utf-8") as f:
+                args.message = f.read()
+        except Exception as e:
+            print(json.dumps({"error": f"Failed to read message file: {e}"}))
+            sys.exit(1)
 
     actions = {
         "post": cmd_post,
