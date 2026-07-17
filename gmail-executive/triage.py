@@ -183,9 +183,9 @@ def _gmail_search_ids(query: str, max_results: int) -> list[dict[str, Any]]:
     return body.get("messages") or []
 
 
-def triage(limit: int = 50) -> None:
+def triage(limit: int = 50, query: str = "in:inbox is:unread") -> None:
     """Triage the most recent INBOX messages and move them to ETS labels."""
-    messages = _gmail_search_ids("in:inbox", max_results=limit)
+    messages = _gmail_search_ids(query, max_results=limit)
     if not messages:
         print("Inbox is empty — nothing to triage.")
         return
@@ -237,9 +237,9 @@ def triage(limit: int = 50) -> None:
     print(f"{'Remained in INBOX':<25} {skipped:>8}\n")
 
 
-def triage_report(limit: int = 15) -> None:
+def triage_report(limit: int = 15, query: str = "in:inbox is:unread") -> None:
     """Same classification as :func:`triage`, plus a JSON report w/ bodies for high-priority."""
-    messages = _gmail_search_ids("in:inbox", max_results=limit)
+    messages = _gmail_search_ids(query, max_results=limit)
     if not messages:
         print(json.dumps({
             "summary": {"total_processed": 0, "moved": {}, "remained_inbox": 0},
@@ -269,11 +269,23 @@ def triage_report(limit: int = 15) -> None:
             classification = "rule"
             importance = "low"
 
+        import datetime
+        internal_date_ms = msg.get("internalDate", "")
+        received_at = ""
+        if internal_date_ms:
+            try:
+                dt = datetime.datetime.fromtimestamp(int(internal_date_ms) / 1000.0, datetime.timezone.utc)
+                received_at = dt.isoformat()
+            except Exception:
+                pass
+
         record: dict[str, Any] = {
             "id": msg["id"],
             "from": from_addr,
             "subject": subject,
             "snippet": snippet,
+            "internalDate": internal_date_ms,
+            "received_at": received_at,
         }
         if target:
             record["label"] = target
@@ -512,6 +524,7 @@ def main() -> None:
     parser.add_argument("--subject")
     parser.add_argument("--body-markdown", dest="body_markdown")
     parser.add_argument("--body")
+    parser.add_argument("--query", default="in:inbox is:unread")
     # Kept for CLI compatibility; batching is now server-side via google_mail_label_batch.
     parser.add_argument("--batch-size", type=int, default=15, help=argparse.SUPPRESS)
     parser.add_argument("--batch-delay", type=float, default=1.0, help=argparse.SUPPRESS)
@@ -522,9 +535,9 @@ def main() -> None:
     elif args.action == "status":
         get_status()
     elif args.action == "triage":
-        triage(limit=args.limit)
+        triage(limit=args.limit, query=args.query)
     elif args.action == "triage-report":
-        triage_report(limit=args.limit)
+        triage_report(limit=args.limit, query=args.query)
     elif args.action == "draft":
         if not args.thread_id:
             parser.error("--thread-id is required for draft")
