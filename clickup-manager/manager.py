@@ -26,7 +26,7 @@ from dateutil import parser as dtparser
 
 # Add shared lib to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'lib'))
-import mcp_google
+import mcp_google  # type: ignore
 
 # ── Logging ──────────────────────────────────────────────────────────
 
