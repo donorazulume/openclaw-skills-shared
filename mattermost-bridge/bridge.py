@@ -46,8 +46,9 @@ else:
 
 try:
     import mcp_comms
+    mcp_comms_client: Any = mcp_comms
 except ImportError:
-    mcp_comms = None
+    mcp_comms_client = None
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("mattermost-bridge")
@@ -98,19 +99,19 @@ def _api(
     payload: Optional[Any] = None,
 ) -> dict[str, Any]:
     """Call Mattermost REST API via Comms MCP request proxy, or direct if fallback is needed."""
-    if mcp_comms:
+    if mcp_comms_client:
         try:
             # Clean path to make sure it doesn't duplicate /api/v4 prefix
             clean_path = path
             if clean_path.startswith("/api/v4"):
                 clean_path = clean_path[7:]
             # Comms MCP request expects method, path, payload
-            return mcp_comms.request(method, clean_path, payload)
+            return mcp_comms_client.request(method, clean_path, payload)
         except Exception as exc:
             log.error("MCP_COMM_ERROR: Comms MCP proxy call failed: %s", exc)
             return {"error": "MCP_COMM_ERROR", "detail": str(exc)}
 
-    # Fallback to direct requests if mcp_comms is not available
+    # Fallback to direct requests if mcp_comms_client is not available
     url = f"{MM_URL}/api/v4{path}"
     try:
         resp = requests.request(
@@ -289,7 +290,7 @@ def _upload_file(channel_id: str, file_path: str) -> dict[str, Any]:
 
     log.info("Uploading %s (%d bytes) to channel %s...", filename, size, channel_id)
 
-    if mcp_comms:
+    if mcp_comms_client:
         try:
             with open(resolved, "rb") as f:
                 import base64
@@ -300,7 +301,7 @@ def _upload_file(channel_id: str, file_path: str) -> dict[str, Any]:
                 "mime_type": mime_type,
                 "file_bytes_b64": file_bytes_b64,
             }
-            res = mcp_comms.call("api/comms/upload", body)
+            res = mcp_comms_client.call("api/comms/upload", body)
             if "error" in res:
                 return res
             file_infos = res.get("file_infos", [])
@@ -318,7 +319,7 @@ def _upload_file(channel_id: str, file_path: str) -> dict[str, Any]:
             log.error("MCP_COMM_ERROR: Comms MCP file upload failed: %s", exc)
             return {"error": "MCP_COMM_ERROR", "detail": str(exc), "file": file_path}
 
-    # Fallback path if mcp_comms is not available
+    # Fallback path if mcp_comms_client is not available
     url = f"{MM_URL}/api/v4/files?channel_id={channel_id}"
     try:
         with open(resolved, "rb") as f:
