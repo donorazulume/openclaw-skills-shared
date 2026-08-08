@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 log = logging.getLogger("rag-brain-manager")
 logging.basicConfig(

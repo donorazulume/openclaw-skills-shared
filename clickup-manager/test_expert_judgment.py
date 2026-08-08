@@ -1,24 +1,19 @@
 import unittest
-from unittest.mock import patch
 from datetime import datetime, timezone
 import sys
 import os
 
 # Add the directory to sys.path to import manager
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if 'manager' in sys.modules:
+    del sys.modules['manager']
 
 import manager
 
 class TestExpertJudgment(unittest.TestCase):
-    @patch('manager.datetime')
-    def test_expert_judgment(self, mock_datetime):
+    def test_expert_judgment(self):
         """Test expert_judgment logic for stale tasks and high priority tasks without due dates."""
-        # Set a fixed time: 2023-10-27 12:00:00 UTC
-        fixed_now = datetime(2023, 10, 27, 12, 0, 0, tzinfo=timezone.utc)
-        mock_datetime.now.return_value = fixed_now
-
-        # Calculate milliseconds for fixed_now
-        now_ms = int(fixed_now.timestamp() * 1000)
+        now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
 
         # 1. Stale task (updated > 14 days ago)
         # 15 days ago

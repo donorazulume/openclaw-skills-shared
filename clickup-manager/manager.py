@@ -12,7 +12,6 @@ Environment variables (injected via Doppler):
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -162,7 +161,8 @@ def _find_folder(folders: list[dict], name: str) -> dict | None:
 
 
 def _find_list(lists: list[dict], name: str) -> dict | None:
-    return next((l for l in lists if l["name"] == name), None)
+    return next((lst for lst in lists if lst["name"] == name), None)
+
 
 
 def expert_judgment(task: dict[str, Any]) -> bool:
@@ -224,7 +224,7 @@ def _ensure_space(team_id: str, name: str, spaces: list[dict]) -> str | None:
         return result["id"]
     except requests.exceptions.HTTPError as e:
         print(f"  [!!] Could not create Space '{name}' — {e}")
-        print(f"       (Plan limit reached? Create manually in ClickUp.)")
+        print("       (Plan limit reached? Create manually in ClickUp.)")
         return None
 
 
@@ -700,7 +700,7 @@ def weekly_review(team_id: str) -> None:
             total_inbox += count
         print(f"\n00 Inbox: {total_inbox} item(s) awaiting triage")
 
-    print(f"\nReview complete. Address overdue (!!) items first, then stale (?) items.")
+    print("\nReview complete. Address overdue (!!) items first, then stale (?) items.")
 
 
 # ── Repo Audit (Dev Studio) ─────────────────────────────────────────
@@ -741,7 +741,7 @@ def repo_audit(team_id: str) -> None:
             if len(open_tasks) > 5:
                 print(f"    ... and {len(open_tasks) - 5} more")
 
-    print(f"\nAudit complete.")
+    print("\nAudit complete.")
 
 
 # ── Workspace Discovery ──────────────────────────────────────────────
@@ -1092,20 +1092,50 @@ def get_tasks(list_id: str) -> None:
     print(f"\nTotal: {len(tasks)} task(s)")
 
 
+AGENT_USER_MAP: dict[str, int] = {
+    "roho": 106596087,
+    "amara": 106596088,
+    "don": 254499419,
+}
+
+
+def resolve_assignee_id(identifier: str) -> int | str:
+    """Resolve an agent name or numeric user ID to a ClickUp user ID."""
+    clean = str(identifier).strip()
+    if clean.isdigit():
+        return int(clean)
+    key = clean.lower()
+    if key in AGENT_USER_MAP:
+        return AGENT_USER_MAP[key]
+    if key == "rob":
+        rob_env = os.environ.get("CLICKUP_USER_ROB", "").strip()
+        if rob_env and rob_env.isdigit():
+            return int(rob_env)
+        return 254499419
+    env_var = f"CLICKUP_USER_{key.upper()}"
+    val = os.environ.get(env_var, "").strip()
+    if val and val.isdigit():
+        return int(val)
+    return clean
+
+
 def get_task(task_id: str) -> None:
     """Fetch and print details for a single task."""
     task = _get(f"/task/{task_id}")
 
-    print(f"Task Details\n")
+    print("Task Details\n")
     print(f"  Name:        {task.get('name', '—')}")
     print(f"  ID:          {task.get('id', '—')}")
     print(f"  Status:      {task.get('status', {}).get('status', '—')}")
     print(f"  Priority:    {(task.get('priority') or {}).get('priority', 'none')}")
     print(f"  URL:         {task.get('url', '—')}")
 
-    assignees = ", ".join(
-        a.get("username", a.get("email", "—")) for a in task.get("assignees", [])
-    ) or "unassigned"
+    assignees_list = [
+        (a.get("username") or a.get("email") or str(a.get("id", "—")))
+        for a in (task.get("assignees") or [])
+        if isinstance(a, dict)
+    ]
+    assignees = ", ".join(assignees_list) if assignees_list else "unassigned"
     print(f"  Assignees:   {assignees}")
 
     tags = ", ".join(t.get("name", "") for t in task.get("tags", [])) or "none"
@@ -1116,7 +1146,7 @@ def get_task(task_id: str) -> None:
         dt = datetime.fromtimestamp(int(due) / 1000, tz=timezone.utc)
         print(f"  Due:         {dt.strftime('%Y-%m-%d %H:%M')}")
     else:
-        print(f"  Due:         not set")
+        print("  Due:         not set")
 
     desc = task.get("description", "").strip()
     if desc:
@@ -1131,14 +1161,21 @@ def create_task(
     description: str | None = None,
     context_tag: str | None = None,
     priority: str | None = None,
+    assignees: list[str] | str | None = None,
 ) -> None:
-    """Create a new task in the given list, optionally with context tag."""
+    """Create a new task in the given list, optionally with context tag and assignees."""
     body: dict[str, Any] = {"name": name}
     if description:
         body["description"] = description
     if priority:
         prio_map = {"urgent": 1, "high": 2, "normal": 3, "low": 4, "none": None}
         body["priority"] = prio_map.get(priority.lower(), 3)
+    if assignees:
+        if isinstance(assignees, str):
+            items = [a.strip() for a in assignees.split(",") if a.strip()]
+        else:
+            items = list(assignees)
+        body["assignees"] = [resolve_assignee_id(a) for a in items if a]
 
     result = _post(f"/list/{list_id}/task", body)
 
@@ -1162,7 +1199,7 @@ def create_task(
 
 
 def update_task(task_id: str, **kwargs: Any) -> None:
-    """Update a task's fields (status, name, description, priority, due_date)."""
+    """Update a task's fields (status, name, description, priority, due_date, assignees)."""
     body: dict[str, Any] = {}
 
     if kwargs.get("status"):
@@ -1180,6 +1217,16 @@ def update_task(task_id: str, **kwargs: Any) -> None:
             dt = dt.replace(tzinfo=timezone.utc)
         body["due_date"] = int(dt.timestamp() * 1000)
 
+    assignees_arg = kwargs.get("assignees") or kwargs.get("assignee")
+    if assignees_arg:
+        if isinstance(assignees_arg, str):
+            items = [a.strip() for a in assignees_arg.split(",") if a.strip()]
+        else:
+            items = list(assignees_arg)
+        resolved = [resolve_assignee_id(a) for a in items if a]
+        if resolved:
+            body["assignees"] = {"add": resolved}
+
     if not body:
         print("Nothing to update — no fields provided.")
         return
@@ -1189,6 +1236,16 @@ def update_task(task_id: str, **kwargs: Any) -> None:
     for key, val in body.items():
         print(f"   {key}: {val}")
     print(f"   URL: {result.get('url', '—')}")
+
+
+def claim_task(task_id: str, assignee: str | None = None) -> None:
+    """Claim/assign a task to an agent (default: amara or current agent env)."""
+    target = assignee or os.environ.get("OPENCLAW_AGENT_NAME", "amara")
+    uid = resolve_assignee_id(target)
+    result = _put(f"/task/{task_id}", {"assignees": {"add": [uid]}})
+    print(f"Claimed Task [{task_id}] for agent '{target}' (User ID: {uid})")
+    print(f"   URL: {result.get('url', '—')}")
+
 
 
 # ── CLI ──────────────────────────────────────────────────────────────
@@ -1215,6 +1272,7 @@ def main() -> None:
             "get-list",
             "create-task",
             "update-task",
+            "claim",
             "delete-task",
             "list-spaces",
             "list-folders",
@@ -1237,6 +1295,8 @@ def main() -> None:
         help="Task priority: urgent/high/normal/low/none.",
     )
     parser.add_argument("--due-date", help="Due date ISO string (update-task).")
+    parser.add_argument("--assignee", help="Agent name ('amara', 'roho', 'rob') or numeric user ID.")
+    parser.add_argument("--assignees", help="Comma-separated agent names or numeric user IDs.")
     parser.add_argument(
         "--target",
         help="Target PARA folder for triage (e.g. '01 Projects', '02 Areas').",
@@ -1300,7 +1360,7 @@ def main() -> None:
             parser.error("--name is required for create-task")
         create_task(
             args.list_id, args.name, description=args.desc, context_tag=args.context,
-            priority=args.priority,
+            priority=args.priority, assignees=args.assignee or args.assignees,
         )
 
     elif args.action == "update-task":
@@ -1313,7 +1373,13 @@ def main() -> None:
             description=args.desc,
             priority=args.priority,
             due_date=args.due_date,
+            assignees=args.assignee or args.assignees,
         )
+
+    elif args.action == "claim":
+        if not args.task_id:
+            parser.error("--task-id is required for claim")
+        claim_task(args.task_id, assignee=args.assignee or args.assignees)
 
     elif args.action == "delete-task":
         if not args.task_id:

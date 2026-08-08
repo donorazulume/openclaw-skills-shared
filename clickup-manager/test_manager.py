@@ -15,9 +15,11 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "
 sys.modules['mcp_google'] = MagicMock()
 
 # Add the directory to sys.path to import manager
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if 'manager' in sys.modules:
+    del sys.modules['manager']
 
-import manager
+import manager  # noqa: E402
 
 class TestRefactorWorkspace(unittest.TestCase):
     @patch('manager._get')
@@ -160,5 +162,35 @@ class TestExpertJudgment(unittest.TestCase):
         }))
 
 
+class TestAssigneeAndGetTask(unittest.TestCase):
+    def test_resolve_assignee_id(self):
+        self.assertEqual(manager.resolve_assignee_id("amara"), 106596088)
+        self.assertEqual(manager.resolve_assignee_id("roho"), 106596087)
+        self.assertEqual(manager.resolve_assignee_id("123456"), 123456)
+
+    @patch('manager._get')
+    def test_get_task_with_none_assignee_fields(self, mock_get):
+        """Issue #497: verify get_task handles assignees with username=None and email=None."""
+        mock_get.return_value = {
+            "id": "86cb2p63e",
+            "name": "UTB Task",
+            "status": {"status": "in progress"},
+            "assignees": [{"id": 106596088, "username": None, "email": None}],
+        }
+        # Should not raise TypeError: sequence item 0: expected str instance, NoneType
+        try:
+            manager.get_task("86cb2p63e")
+        except TypeError as e:
+            self.fail(f"get_task raised TypeError on None assignee fields: {e}")
+
+    @patch('manager._put')
+    def test_claim_task(self, mock_put):
+        """Issue #498: verify claim_task calls PUT /task/{id} with correct assignee."""
+        mock_put.return_value = {"id": "task123", "url": "https://app.clickup.com/t/task123"}
+        manager.claim_task("task123", assignee="amara")
+        mock_put.assert_called_once_with("/task/task123", {"assignees": {"add": [106596088]}})
+
+
 if __name__ == '__main__':
     unittest.main()
+

@@ -9,10 +9,8 @@ helpers and the high-level CLI actions with ``mcp_google.call`` patched out.
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import sys
-import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch

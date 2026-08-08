@@ -27,8 +27,9 @@ Comprehensive ClickUp workspace manager for Roho. Provides full workspace discov
 - **get-tasks**: List tasks in a specific list by ID.
 - **get-task**: Get full details of a specific task by ID.
 - **get-list**: Get detailed info about a specific list (statuses, space, folder, task count).
-- **create-task**: Create a new task in a specific list with optional priority and context tag.
-- **update-task**: Update a task's status, priority, name, due date, or description.
+- **create-task**: Create a new task in a specific list with optional priority, context tag, and assignees (`--assignee`).
+- **update-task**: Update a task's status, priority, name, due date, description, or assignees (`--assignee`).
+- **claim**: Claim/assign a task to an agent (`--task-id <id> --assignee <agent_name>`).
 - **delete-task**: Permanently delete a task by ID.
 - **move-task**: Move a task between arbitrary lists.
 - **triage**: Move a task from '00 Inbox' to a PARA folder with context tagging.
