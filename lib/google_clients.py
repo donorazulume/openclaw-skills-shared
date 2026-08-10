@@ -1,15 +1,26 @@
-"""Retired shared Google OAuth client (SPEC-GAUTH-001 v2.0.0, #323/#324).
+"""Retired shim (SPEC-GAUTH-001 revised, #323/#324).
 
-`openclaw-mcp-google` (port 8103 in the openclaw-docker stack) is the sole process
-that holds the Google OAuth refresh token, refreshes it, or writes Doppler. Every
-skill MUST now call MCP Google over HTTP via :mod:`mcp_google`.
+The gateway no longer mints or holds Google OAuth credentials. Every Google API
+operation goes through ``openclaw-mcp-google`` over HTTP.
 
-Importing this module raises :class:`RuntimeError` so the next caller is forced
-to migrate to `mcp_google.call("google_mail_*" / "google_drive_*" / "google_calendar_*", ...)`.
+Importing this module raises :class:`RuntimeError` so any caller that still relies
+on ``get_credentials`` is forced to migrate to :mod:`mcp_google`.
+
+Migration cheat-sheet:
+
+    # before
+    from google_clients import get_credentials
+    creds = get_credentials(SCOPES)
+    service = build("gmail", "v1", credentials=creds)
+    profile = service.users().getProfile(userId="me").execute()
+
+    # after
+    import mcp_google
+    profile = mcp_google.call("google_mail_search", {"query": "me", "max_results": 1})
+    # or use a tailored MCP tool (google_mail_send, google_drive_list, ...).
 """
 
 raise RuntimeError(
-    "openclaw-skills-shared/lib/google_clients.py is retired (#323/#324). "
-    "Import `mcp_google` and call `mcp_google.call(<tool>, <args>)` instead — "
-    "see openclaw-docker/skills/lib/mcp_google.py for the public surface."
+    "skills/lib/google_clients.py is retired (#323/#324). "
+    "Import `mcp_google` and call `mcp_google.call('google_mail_*' | 'google_drive_*' | 'google_calendar_*', ...)` instead."
 )

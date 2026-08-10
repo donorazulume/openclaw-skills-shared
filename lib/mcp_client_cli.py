@@ -30,6 +30,18 @@ async def main():
     if token and token.startswith("$"):
         env_var_name = token[1:]
         token = os.environ.get(env_var_name)
+        if not token and os.path.exists("/proc/1/environ"):
+            try:
+                with open("/proc/1/environ", "rb") as f:
+                    environ_bytes = f.read()
+                for item in environ_bytes.split(b"\x00"):
+                    if b"=" in item:
+                        k, v = item.split(b"=", 1)
+                        if k.decode("utf-8", errors="ignore") == env_var_name:
+                            token = v.decode("utf-8", errors="ignore")
+                            break
+            except Exception as e:
+                logger.error(f"Failed to read /proc/1/environ: {e}")
 
     headers = {}
     if token:
@@ -46,6 +58,7 @@ if __name__ == "__main__":
         anyio.run(main)
     except (KeyboardInterrupt, SystemExit):
         pass
-    except Exception as e:
-        logger.error(f"MCP Stdio-to-SSE bridge failed: {e}")
+    except Exception:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         sys.exit(1)

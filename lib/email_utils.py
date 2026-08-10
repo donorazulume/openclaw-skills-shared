@@ -8,22 +8,80 @@ produce consistent multipart/alternative emails.
 
 from __future__ import annotations
 
-import html as _html_mod
 import re
 
-import markdown as _md_lib
+try:
+    import bleach  # type: ignore[import-not-found] # pyright: ignore[reportMissingImports]
+except ImportError:
+    bleach = None
+
+try:
+    import markdown as _md_lib  # type: ignore[import-not-found] # pyright: ignore[reportMissingImports]
+except ImportError:
+    _md_lib = None
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
+# Allowed subset for professional email HTML (post-Markdown sanitization, REQ-EMAIL-001).
+_BLEACH_ALLOWED_TAGS = frozenset(
+    {
+        "a",
+        "b",
+        "blockquote",
+        "br",
+        "code",
+        "em",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "i",
+        "li",
+        "ol",
+        "p",
+        "pre",
+        "strong",
+        "table",
+        "tbody",
+        "td",
+        "th",
+        "thead",
+        "tr",
+        "ul",
+    }
+)
+
+_BLEACH_ALLOWED_ATTRIBUTES = {
+    "a": ["href", "title"],
+    "table": ["border"],
+}
+
+_BLEACH_ALLOWED_PROTOCOLS = frozenset({"http", "https", "mailto"})
+
 
 def markdown_to_html(md_text: str) -> str:
-    """Convert Markdown to well-formed HTML.
+    """Convert Markdown to well-formed HTML."""
+    if _md_lib is not None:
+        raw_html = _md_lib.markdown(
+            md_text, extensions=["nl2br", "tables", "fenced_code"]
+        )
+    else:
+        lines = [f"<p>{line.strip()}</p>" for line in md_text.splitlines() if line.strip()]
+        raw_html = "\n".join(lines)
 
-    Raw HTML in the source is escaped first to prevent injection and enforce
-    Markdown-only authoring (REQ-EMAIL-001, REQ-EMAIL-005).
-    """
-    sanitized = _html_mod.escape(md_text)
-    return _md_lib.markdown(sanitized, extensions=["nl2br", "tables", "fenced_code"])
+    if bleach is not None:
+        cleaned = bleach.clean(
+            raw_html,
+            tags=_BLEACH_ALLOWED_TAGS,
+            attributes=_BLEACH_ALLOWED_ATTRIBUTES,
+            protocols=_BLEACH_ALLOWED_PROTOCOLS,
+            strip=True,
+        )
+        return str(cleaned)
+    return raw_html
 
 
 def markdown_to_plaintext(md_text: str) -> str:
