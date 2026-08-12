@@ -2,7 +2,6 @@ import os
 import json
 import sqlite3
 import sys
-import shutil
 import time
 
 JOBS_PATH = os.path.expanduser("~/.openclaw/cron/jobs.json")

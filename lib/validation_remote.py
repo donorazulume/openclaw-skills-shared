@@ -7,7 +7,6 @@ to prevent false negatives caused by stale or drifted local clones.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from typing import Any

@@ -16,7 +16,7 @@ _LIB_DIR = str(pathlib.Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-import mcp_lifeos
+import mcp_lifeos  # noqa: E402
 
 
 def main() -> None:

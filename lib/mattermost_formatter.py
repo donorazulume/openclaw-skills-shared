@@ -180,7 +180,7 @@ def format_agent_response(payload: AgentResponsePayload) -> MattermostPostPayloa
 
             if not re.search(r"(?i)>\s*\*\*TL;DR:\*\*", content):
                 # Auto-generate TL;DR from first paragraph
-                lines = [l.strip() for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
+                lines = [line.strip() for line in content.splitlines() if line.strip() and not line.strip().startswith("#")]
                 tldr_text = lines[0][:150] + "..." if lines else "Summary of response below."
                 tldr_quote = f"> **TL;DR:** {tldr_text}\n\n"
                 content = tldr_quote + content
@@ -191,7 +191,7 @@ def format_agent_response(payload: AgentResponsePayload) -> MattermostPostPayloa
             content = ensure_code_language_tags(content)
 
             if not re.search(r"(?i)>\s*\*\*TL;DR:\*\*", content):
-                lines = [l.strip() for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
+                lines = [line.strip() for line in content.splitlines() if line.strip() and not line.strip().startswith("#")]
                 tldr_text = lines[0][:150] + "..." if lines else "Full breakdown attached in thread."
                 tldr_quote = f"> **TL;DR:** {tldr_text}\n\n"
                 content = tldr_quote + content

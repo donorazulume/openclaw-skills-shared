@@ -18,11 +18,11 @@ lib_dir = str(pathlib.Path(__file__).resolve().parent)
 if lib_dir not in sys.path:
     sys.path.insert(0, lib_dir)
 
-import mcp_google
-import mcp_lifeos
-import mcp_m365
-import mcp_bible
-import email_utils
+import mcp_google  # noqa: E402
+import mcp_lifeos  # noqa: E402
+import mcp_m365  # noqa: E402
+import mcp_bible  # noqa: E402
+import email_utils  # noqa: E402
 
 def build_bible_section() -> str:
     """Fetch daily devotional reading and verse of the day from openclaw-mcp-bible.

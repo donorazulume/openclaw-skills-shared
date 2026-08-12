@@ -21,8 +21,8 @@ _LIB_DIR = str(pathlib.Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-import yaml  # pyright: ignore[reportMissingImports,reportMissingTypeStubs]
-import mcp_firefly  # pyright: ignore[reportMissingImports]
+import yaml  # noqa: E402 # pyright: ignore[reportMissingImports,reportMissingTypeStubs]
+import mcp_firefly  # noqa: E402 # pyright: ignore[reportMissingImports]
 
 log = logging.getLogger("openclaw.firefly_extractor")
 
