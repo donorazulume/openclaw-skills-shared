@@ -112,6 +112,23 @@ def get_open_orders(timeout: float = DEFAULT_TIMEOUT_SEC) -> list[dict[str, Any]
     return []
 
 
+def get_transaction_history(limit: int = 50, timeout: float = DEFAULT_TIMEOUT_SEC) -> list[dict[str, Any]]:
+    """Fetch executed trade transaction history from openclaw-mcp-trade212 (Issue #507)."""
+    try:
+        res = mcp_trade212.call("api/trade212/history/orders", timeout=timeout)
+    except Exception:
+        res = mcp_trade212.call("api/trade212/transactions", timeout=timeout)
+    if isinstance(res, dict):
+        raw_trades = res.get("data")
+        if isinstance(raw_trades, list):
+            return raw_trades
+        elif isinstance(raw_trades, dict):
+            return raw_trades.get("trades", [])
+    elif isinstance(res, list):
+        return res
+    return []
+
+
 def get_live_portfolio_snapshot(timeout: float = DEFAULT_TIMEOUT_SEC) -> dict[str, Any]:
     """Retrieve full live portfolio data snapshot from openclaw-mcp-trade212."""
     account = get_account_summary(timeout=timeout)

@@ -61,7 +61,7 @@ def call(endpoint: str, body: dict[str, Any] | None = None, *, timeout: float = 
     url = f"{_base_url()}/{ep}"
     
     # Intelligently select GET vs POST based on endpoint name
-    method = "GET" if any(x in endpoint for x in ["account-summary", "portfolio", "open-orders"]) else "POST"
+    method = "GET" if any(x in endpoint for x in ["account-summary", "portfolio", "open-orders", "instruments", "history"]) else "POST"
     
     try:
         if method == "GET":
