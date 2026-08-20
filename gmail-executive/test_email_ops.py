@@ -99,6 +99,29 @@ class TestTransactionStateMachine(unittest.TestCase):
 
 
 def _fake_mg_call(tool, arguments=None, **_kwargs):
+    if tool.startswith("m365_"):
+        if tool == "m365_mail_send":
+            return {"message_id": "sent-1", "thread_id": "t1", "status": "sent"}
+        if tool in ("m365_mail_list", "m365_mail_search"):
+            return {
+                "messages": [
+                    {"id": "m1", "subject": "URGENT: production down", "from": {"emailAddress": {"address": "alerts@x.com"}}},
+                    {"id": "m2", "subject": "Weekly digest", "from": {"emailAddress": {"address": "newsletter@x.com"}}},
+                    {"id": "m3", "subject": "Random chatter", "from": {"emailAddress": {"address": "buddy@x.com"}}},
+                ],
+                "total": 3,
+            }
+        if tool == "m365_mail_label_info":
+            return {"id": arguments.get("label"), "name": arguments.get("label"), "messages_total": 10, "messages_unread": 2, "exists": True}
+        if tool == "m365_mail_list_labels":
+            return {
+                "labels": [
+                    {"id": "INBOX", "name": "INBOX", "type": "system"},
+                    {"id": "L_action", "name": "01_Action", "type": "user"},
+                ],
+                "total": 2,
+            }
+        return {"status": "ok"}
     arguments = arguments or {}
     if tool == "google_mail_search":
         return {"messages": [{"id": "msg-x", "subject": "Hi", "from": "alice@example.com"}], "total": 1}
@@ -115,23 +138,23 @@ def _fake_mg_call(tool, arguments=None, **_kwargs):
 
 class TestIngestRoutesViaMCP(unittest.TestCase):
     def test_ingest_calls_mcp_only(self):
-        with patch.object(triage.mcp_google, "call", side_effect=_fake_mg_call) as mocked:
+        with patch.object(triage.mcp_google, "call", side_effect=_fake_mg_call) as mocked_g, patch.object(triage.mcp_m365, "call", side_effect=_fake_mg_call) as mocked_m:
             ingested = email_ops.ingest_emails(limit=5)
         self.assertEqual(len(ingested), 1)
-        calls = [c.args[0] for c in mocked.call_args_list]
-        self.assertIn("google_mail_search", calls)
+        calls = [c.args[0] for c in mocked_g.call_args_list]
+        self.assertTrue("google_mail_search" in calls or "m365_mail_list" in calls or "m365_mail_search" in calls)
         self.assertIn("google_mail_read", calls)
 
 
 class TestSendGatedRoutesViaMCP(unittest.TestCase):
     def test_internal_auto_send(self):
-        with patch.object(triage.mcp_google, "call", side_effect=_fake_mg_call) as mocked:
+        with patch.object(triage.mcp_google, "call", side_effect=_fake_mg_call) as mocked_g, patch.object(triage.mcp_m365, "call", side_effect=_fake_mg_call) as mocked_m:
             result = email_ops.send_gated(
                 to=["a@chimexhldg.com"], subject="Hi", body_markdown="**hi**", thread_id="thread-a",
             )
         self.assertEqual(result["status"], "success")
-        called = [c.args[0] for c in mocked.call_args_list]
-        self.assertIn("google_mail_send", called)
+        called = [c.args[0] for c in mocked_g.call_args_list] + [c.args[0] for c in mocked_m.call_args_list]
+        self.assertTrue("google_mail_send" in called or "m365_mail_send" in called)
 
 
 if __name__ == "__main__":

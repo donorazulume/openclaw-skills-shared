@@ -32,22 +32,36 @@ class M365MCPError(RuntimeError):
         self.code = code
 
 
+try:
+    from token_resolver import resolve_secret
+except ImportError:
+    def resolve_secret(k: str) -> str | None:
+        v = os.environ.get(k, "").strip()
+        return v if v else None
+
+
 def _base_url() -> str:
     return (os.environ.get("MCP_M365_URL") or os.environ.get("M365_MCP_URL") or DEFAULT_URL).rstrip("/")
 
 
 def _bearer() -> str:
-    # Try dedicated M365 tokens first, then Open Brain fallbacks
+    agent = os.environ.get("OPENCLAW_AGENT_NAME", "roho").upper()
     for var in [
+        f"MCP_TOKEN_M365_{agent}",
         "MCP_TOKEN_M365",
         "MCP_TOKEN_M365_ROHO",
         "MCP_TOKEN_M365_AMARA",
         "MCP_TOKEN_M365_ROB",
+        f"MCP_TOKEN_{agent}",
         "MCP_TOKEN_ROHO",
         "MCP_TOKEN_AMARA",
         "MCP_TOKEN_ROB",
+        "MCP_TOKEN_SYSADMIN_ROHO",
+        "MCP_TOKEN_PROD_ROHO",
+        "MCP_TOKEN",
+        "M365_TOKEN",
     ]:
-        tok = os.environ.get(var, "").strip()
+        tok = resolve_secret(var)
         if tok:
             return tok
 

@@ -240,7 +240,7 @@ def triage(limit: int = 50) -> None:
 
         subject = msg.get("subject") or ""
         from_dict = msg.get("from") or {}
-        from_addr = from_dict.get("emailAddress", {}).get("address", "")
+        from_addr = (from_dict.get("emailAddress", {}).get("address") if isinstance(from_dict, dict) else str(from_dict)) or ""
 
         target = expert_judgment_from_headers(subject, from_addr) or _rule_target(subject, from_addr)
         if not target:
@@ -278,7 +278,7 @@ def triage_report(limit: int = 15) -> None:
     for msg in messages:
         subject = msg.get("subject") or ""
         from_dict = msg.get("from") or {}
-        from_addr = from_dict.get("emailAddress", {}).get("address", "")
+        from_addr = (from_dict.get("emailAddress", {}).get("address") if isinstance(from_dict, dict) else str(from_dict)) or ""
         snippet = msg.get("bodyPreview") or ""
         cats = msg.get("categories") or []
 
