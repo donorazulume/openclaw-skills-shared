@@ -8,7 +8,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 if 'manager' in sys.modules:
     del sys.modules['manager']
 
-import manager
+import importlib.util
+_spec = importlib.util.spec_from_file_location("clickup_manager_manager_test_mod", r"/Users/don/openclaw-roho/skills-shared/clickup-manager/manager.py")
+manager = importlib.util.module_from_spec(_spec)
+sys.modules["clickup_manager_manager_test_mod"] = manager
+sys.modules["manager"] = manager
+_spec.loader.exec_module(manager)
 
 class TestExpertJudgment(unittest.TestCase):
     def test_expert_judgment(self):

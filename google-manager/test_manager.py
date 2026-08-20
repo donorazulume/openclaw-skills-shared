@@ -14,12 +14,16 @@ sys.path.insert(0, str(_here.parent / "lib"))
 for _mod in ("dateutil",):
     if _mod not in sys.modules:
         # dateutil might not be installed in the local pytest env.
-        sys.modules[_mod] = MagicMock()
+        if _mod not in sys.modules:
+            try:
+                __import__(_mod)
+            except ImportError:
+                sys.modules[_mod] = MagicMock()
         sys.modules["dateutil.parser"] = sys.modules[_mod].parser
 
-spec = importlib.util.spec_from_file_location("manager", str(_here / "manager.py"))
+spec = importlib.util.spec_from_file_location("google_manager_module", str(_here / "manager.py"))
 manager = importlib.util.module_from_spec(spec)
-sys.modules["manager"] = manager
+sys.modules["google_manager_module"] = manager
 spec.loader.exec_module(manager)
 
 

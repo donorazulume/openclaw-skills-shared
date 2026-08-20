@@ -19,7 +19,11 @@ _LIB_DIR = str(pathlib.Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
+<<<<<<< HEAD
 import mcp_trade212  # noqa: E402
+=======
+import mcp_trade212
+>>>>>>> 99e9ff0 (fix(tests): isolate module namespace and mock exceptions in skills-shared)
 
 log = logging.getLogger("openclaw.trading_212_client")
 
@@ -77,7 +81,28 @@ def get_portfolio_positions(timeout: float = DEFAULT_TIMEOUT_SEC) -> list[dict[s
         avg_price = float(item.get("averagePrice") or item.get("average_price") or item.get("cost_basis") or 0.0)
         curr_price = float(item.get("currentPrice") or item.get("current_price") or avg_price)
         ppl = float(item.get("ppl") or item.get("unrealized_pnl") or ((curr_price - avg_price) * quantity))
+<<<<<<< HEAD
         market_val = float(item.get("marketValue") or item.get("market_value") or (quantity * curr_price))
+=======
+        raw_curr = str(item.get("currency") or "").upper()
+        is_pence = (
+            raw_curr in ("GBX", "GBP")
+            or ticker.endswith(("_L_EQ", "_GB_EQ", "_UK_EQ"))
+            or ticker.startswith("SGLN")
+        ) and (raw_curr == "GBX" or ticker.endswith(("_L_EQ", "_GB_EQ", "_UK_EQ")) or ticker.startswith("SGLN") or curr_price > 100.0)
+
+        if "value_in_account_currency" in item and item["value_in_account_currency"] is not None:
+            market_val = float(item["value_in_account_currency"])
+        elif is_pence:
+            market_val = (quantity * curr_price) / 100.0 if curr_price > 100.0 else (quantity * curr_price)
+        else:
+            market_val = float(item.get("marketValue") or item.get("market_value") or item.get("value") or (quantity * curr_price))
+
+        if is_pence and avg_price > 100.0:
+            avg_price = avg_price / 100.0
+        if is_pence and curr_price > 100.0:
+            curr_price = curr_price / 100.0
+>>>>>>> 99e9ff0 (fix(tests): isolate module namespace and mock exceptions in skills-shared)
 
         total_invested += market_val
         positions.append({

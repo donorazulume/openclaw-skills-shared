@@ -20,7 +20,11 @@ sys.path.insert(0, str(_here.parent / "lib"))
 
 # Optional deps the gateway image ships but the local pytest env may not.
 for _mod in ("bleach", "markdown"):
-    sys.modules.setdefault(_mod, MagicMock())
+    if _mod not in sys.modules:
+        try:
+            __import__(_mod)
+        except ImportError:
+            sys.modules[_mod] = MagicMock()
 
 spec = importlib.util.spec_from_file_location("triage", str(_here / "triage.py"))
 triage = importlib.util.module_from_spec(spec)

@@ -21,7 +21,11 @@ sys.path.insert(0, str(_here.parent / "lib"))
 
 for _mod in ("dateutil",):
     if _mod not in sys.modules:
-        sys.modules[_mod] = MagicMock()
+        if _mod not in sys.modules:
+            try:
+                __import__(_mod)
+            except ImportError:
+                sys.modules[_mod] = MagicMock()
         sys.modules["dateutil.parser"] = sys.modules[_mod].parser
 
 spec = importlib.util.spec_from_file_location("manager", str(_here / "manager.py"))

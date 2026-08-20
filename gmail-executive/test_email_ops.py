@@ -20,7 +20,11 @@ sys.path.insert(0, str(_here))
 sys.path.insert(0, str(_here.parent / "lib"))
 
 for _mod in ("bleach", "markdown", "requests"):
-    sys.modules.setdefault(_mod, MagicMock())
+        if _mod not in sys.modules:
+            try:
+                __import__(_mod)
+            except ImportError:
+                sys.modules[_mod] = MagicMock()
 
 # Point transaction storage at a temp dir so tests don't write into the gateway home.
 _tmp = tempfile.mkdtemp(prefix="email_ops_tests_")

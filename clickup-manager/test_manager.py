@@ -7,7 +7,10 @@ import os
 # OAuth libraries — Calendar reads come from openclaw-mcp-google. We still mock
 # `requests`, `pytz`, and `dateutil` so the local pytest env can collect the
 # module even when those system packages aren't installed.
-sys.modules['requests'] = MagicMock()
+mock_req = MagicMock()
+mock_req.RequestException = Exception
+if "requests" not in sys.modules:
+    sys.modules['requests'] = mock_req
 sys.modules['pytz'] = MagicMock()
 sys.modules['dateutil'] = MagicMock()
 # `manager` imports `mcp_google` from the sibling `lib/` folder; add it to path.
@@ -19,12 +22,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 if 'manager' in sys.modules:
     del sys.modules['manager']
 
-import manager  # noqa: E402
+import importlib.util
+_spec = importlib.util.spec_from_file_location("clickup_manager_manager_test_mod", r"/Users/don/openclaw-roho/skills-shared/clickup-manager/manager.py")
+manager = importlib.util.module_from_spec(_spec)
+sys.modules["clickup_manager_manager_test_mod"] = manager
+sys.modules["manager"] = manager
+_spec.loader.exec_module(manager)  # noqa: E402
 
 class TestRefactorWorkspace(unittest.TestCase):
-    @patch('manager._get')
-    @patch('manager._post')
-    @patch('manager.log') # suppress logging during tests
+    @patch.object(manager, '_get')
+    @patch.object(manager, '_post')
+    @patch.object(manager, 'log') # suppress logging during tests
     def test_refactor_workspace_creates_everything_fresh(self, mock_log, mock_post, mock_get):
         """Test refactor_workspace when nothing exists."""
 
@@ -84,9 +92,9 @@ class TestRefactorWorkspace(unittest.TestCase):
         self.assertIn(call('/space/new_id/tag', {"tag": {"name": "@DeepWork"}}), mock_post.mock_calls)
 
 
-    @patch('manager._get')
-    @patch('manager._post')
-    @patch('manager.log')
+    @patch.object(manager, '_get')
+    @patch.object(manager, '_post')
+    @patch.object(manager, 'log')
     def test_refactor_workspace_idempotent(self, mock_log, mock_post, mock_get):
         """Test refactor_workspace when everything already exists."""
 
@@ -168,7 +176,7 @@ class TestAssigneeAndGetTask(unittest.TestCase):
         self.assertEqual(manager.resolve_assignee_id("roho"), 106596087)
         self.assertEqual(manager.resolve_assignee_id("123456"), 123456)
 
-    @patch('manager._get')
+    @patch.object(manager, '_get')
     def test_get_task_with_none_assignee_fields(self, mock_get):
         """Issue #497: verify get_task handles assignees with username=None and email=None."""
         mock_get.return_value = {
@@ -183,7 +191,7 @@ class TestAssigneeAndGetTask(unittest.TestCase):
         except TypeError as e:
             self.fail(f"get_task raised TypeError on None assignee fields: {e}")
 
-    @patch('manager._put')
+    @patch.object(manager, '_put')
     def test_claim_task(self, mock_put):
         """Issue #498: verify claim_task calls PUT /task/{id} with correct assignee."""
         mock_put.return_value = {"id": "task123", "url": "https://app.clickup.com/t/task123"}
