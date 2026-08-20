@@ -22,6 +22,7 @@ for _mod in ("dateutil",):
         sys.modules["dateutil.parser"] = sys.modules[_mod].parser
 
 spec = importlib.util.spec_from_file_location("google_manager_module", str(_here / "manager.py"))
+assert spec is not None and spec.loader is not None
 manager = importlib.util.module_from_spec(spec)
 sys.modules["google_manager_module"] = manager
 spec.loader.exec_module(manager)
