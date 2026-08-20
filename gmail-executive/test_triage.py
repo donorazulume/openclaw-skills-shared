@@ -27,6 +27,7 @@ for _mod in ("bleach", "markdown"):
             sys.modules[_mod] = MagicMock()
 
 spec = importlib.util.spec_from_file_location("triage", str(_here / "triage.py"))
+assert spec is not None and spec.loader is not None
 triage = importlib.util.module_from_spec(spec)
 sys.modules["triage"] = triage
 spec.loader.exec_module(triage)
@@ -84,6 +85,7 @@ class TestForcedCC(unittest.TestCase):
 
 
 def _fake_call(tool, arguments=None, **_kwargs):
+    arguments = arguments or {}
     if tool.startswith("m365_"):
         if tool == "m365_mail_send":
             return {"message_id": "sent-1", "thread_id": "t1", "status": "sent"}

@@ -32,11 +32,13 @@ os.environ["OPENCLAW_DATA_DIR"] = _tmp
 
 # Triage module must load first because email_ops imports send_email lazily.
 triage_spec = importlib.util.spec_from_file_location("triage", str(_here / "triage.py"))
+assert triage_spec is not None and triage_spec.loader is not None
 triage = importlib.util.module_from_spec(triage_spec)
 sys.modules["triage"] = triage
 triage_spec.loader.exec_module(triage)
 
 spec = importlib.util.spec_from_file_location("email_ops", str(_here / "email_ops.py"))
+assert spec is not None and spec.loader is not None
 email_ops = importlib.util.module_from_spec(spec)
 sys.modules["email_ops"] = email_ops
 spec.loader.exec_module(email_ops)
@@ -99,6 +101,7 @@ class TestTransactionStateMachine(unittest.TestCase):
 
 
 def _fake_mg_call(tool, arguments=None, **_kwargs):
+    arguments = arguments or {}
     if tool.startswith("m365_"):
         if tool == "m365_mail_send":
             return {"message_id": "sent-1", "thread_id": "t1", "status": "sent"}
@@ -122,7 +125,6 @@ def _fake_mg_call(tool, arguments=None, **_kwargs):
                 "total": 2,
             }
         return {"status": "ok"}
-    arguments = arguments or {}
     if tool == "google_mail_search":
         return {"messages": [{"id": "msg-x", "subject": "Hi", "from": "alice@example.com"}], "total": 1}
     if tool == "google_mail_read":
