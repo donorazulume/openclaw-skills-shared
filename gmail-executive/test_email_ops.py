@@ -140,7 +140,7 @@ def _fake_mg_call(tool, arguments=None, **_kwargs):
 
 class TestIngestRoutesViaMCP(unittest.TestCase):
     def test_ingest_calls_mcp_only(self):
-        with patch.object(triage.mcp_google, "call", side_effect=_fake_mg_call) as mocked_g, patch.object(triage.mcp_m365, "call", side_effect=_fake_mg_call) as mocked_m:
+        with patch.object(triage.mcp_google, "call", side_effect=_fake_mg_call) as mocked_g, patch.object(triage.mcp_m365, "call", side_effect=_fake_mg_call) :
             ingested = email_ops.ingest_emails(limit=5)
         self.assertEqual(len(ingested), 1)
         calls = [c.args[0] for c in mocked_g.call_args_list]
