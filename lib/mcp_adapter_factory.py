@@ -62,7 +62,8 @@ def resolve_service_config(service_name: str) -> dict[str, str]:
     
     token = None
     agent = os.environ.get("OPENCLAW_AGENT_NAME", "roho").upper()
-    for env_var in [f"MCP_TOKEN_{service_name.upper()}_{agent}"] + srv["token_envs"]:
+    token_envs: list[str] = list(srv.get("token_envs", []))  # type: ignore[arg-type]
+    for env_var in [f"MCP_TOKEN_{service_name.upper()}_{agent}"] + token_envs:
         token = resolve_secret(env_var)
         if token:
             break
@@ -110,13 +111,12 @@ def call_mcp_tool(service_name: str, tool_name: str, arguments: dict[str, Any] |
             from langchain_mcp_adapters.client import MultiServerMCPClient
 
             async def _run_adapter() -> Any:
-                client: Any = MultiServerMCPClient({
-                    srv_name: {
-                        "transport": "streamable_http",
-                        "url": cfg["mcp_url"],
-                        "headers": headers,
-                    }
-                })
+                transport_config: dict[str, Any] = {
+                    "transport": "streamable_http",
+                    "url": cfg["mcp_url"],
+                    "headers": headers,
+                }
+                client: Any = MultiServerMCPClient({srv_name: transport_config})  # type: ignore[arg-type]
                 tools = await client.get_tools()
                 target_tool = next((t for t in tools if t.name == tool_name), None)
                 if target_tool:
