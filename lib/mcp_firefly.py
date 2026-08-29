@@ -73,7 +73,14 @@ def call(
 
     if not method:
         ep_lower = endpoint.lower()
-        if any(x in ep_lower for x in ["categorize", "reconcile", "test", "trigger", "webhook", "import", "upload"]):
+        # Reconcile query endpoints are GET-only on the MCP server; the
+        # mutation endpoints are POST-only. Match reconcile mutations by
+        # explicit subpath instead of a bare "reconcile" substring, which
+        # would wrongly POST unmatched/report/status (405 Method Not Allowed).
+        _RECONCILE_POST = ("/start", "/statement", "/rules/create", "/bulk", "/seed", "/auto-match")
+        if any(x in ep_lower for x in ["categorize", "test", "trigger", "webhook", "import", "upload"]):
+            method = "POST"
+        elif "/reconcile" in ep_lower and any(x in ep_lower for x in _RECONCILE_POST):
             method = "POST"
         elif any(x in ep_lower for x in ["update", "put"]):
             method = "PUT"
