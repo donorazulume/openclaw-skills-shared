@@ -253,6 +253,16 @@ def main():
         subject_str = f"LifeOS Morning Briefing — {date_str}"
         target_addr = "donorazulume@gmail.com"
         
+        # Content gate (Issue #630): Check if briefing has non-empty content
+        clean_brief = (markdown_brief or "").strip()
+        if not clean_brief or clean_brief == "Processed 0 sections":
+            print("WARNING: Compiled briefing has 0 non-empty sections. Appending satellite warning notice.")
+            markdown_brief = (
+                f"# LifeOS Morning Briefing — {date_str}\n\n"
+                "> ⚠️ **Satellite Data Notice**: No satellite domain sections (finance, property, documents) were populated for today. "
+                "Please check agent status sweeps."
+            )
+        
         # Convert Markdown briefing to rich, well-formed HTML
         html_body = email_utils.markdown_to_html(markdown_brief)
         
