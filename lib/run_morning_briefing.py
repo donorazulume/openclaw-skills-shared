@@ -5,12 +5,13 @@ Performs briefing compilation (server-side with local fallbacks), emails a refer
 to donorazulume@gmail.com, sends an actionable summary DM to Don, and logs the execution.
 """
 
-import os
-import sys
 import json
+import os
 import pathlib
 import subprocess
+import sys
 from datetime import datetime, time
+
 import requests  # type: ignore
 
 # Ensure we can resolve local imports from this directory
@@ -18,11 +19,12 @@ lib_dir = str(pathlib.Path(__file__).resolve().parent)
 if lib_dir not in sys.path:
     sys.path.insert(0, lib_dir)
 
-import mcp_google  # noqa: E402
-import mcp_lifeos  # noqa: E402
-import mcp_m365  # noqa: E402
-import mcp_bible  # noqa: E402
-import email_utils  # noqa: E402
+import email_utils
+import mcp_bible
+import mcp_google
+import mcp_lifeos
+import mcp_m365
+
 
 def build_bible_section() -> str:
     """Fetch daily devotional reading and verse of the day from openclaw-mcp-bible.

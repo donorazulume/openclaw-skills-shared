@@ -1,5 +1,7 @@
 import unittest
-from prompt_injection import sanitize_text, wrap_content, strip_invisible_chars
+
+from prompt_injection import sanitize_text, strip_invisible_chars, wrap_content
+
 
 class TestPromptInjection(unittest.TestCase):
     

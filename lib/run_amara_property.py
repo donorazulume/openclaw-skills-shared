@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Programmatic orchestrator for Amara property mailbox monitoring and LifeOS push."""
 
-import os
-import sys
 import json
+import os
 import pathlib
 import subprocess
+import sys
+
 import requests  # type: ignore
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import mcp_lifeos
+
 
 def resolve_bridge_path():
     home = os.environ.get("HOME", "/home/node")

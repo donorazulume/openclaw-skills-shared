@@ -8,15 +8,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import pathlib
+import sys
 
 # Add current folder to sys.path so we can import mcp_lifeos
 _LIB_DIR = str(pathlib.Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-import mcp_lifeos  # noqa: E402
+import mcp_lifeos
 
 
 def main() -> None:

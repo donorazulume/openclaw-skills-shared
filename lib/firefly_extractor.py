@@ -11,18 +11,17 @@ from __future__ import annotations
 import csv
 import io
 import logging
-from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Tuple
-
 import pathlib
 import sys
+from decimal import Decimal, InvalidOperation
+from typing import Any, Dict, List, Tuple
 
 _LIB_DIR = str(pathlib.Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-import yaml  # noqa: E402 # pyright: ignore[reportMissingImports,reportMissingTypeStubs]
-import mcp_firefly  # noqa: E402 # pyright: ignore[reportMissingImports]
+import mcp_firefly  # pyright: ignore[reportMissingImports]
+import yaml  # pyright: ignore[reportMissingImports,reportMissingTypeStubs]
 
 log = logging.getLogger("openclaw.firefly_extractor")
 
@@ -59,17 +58,17 @@ DEFAULT_ENTITY_BASE = {
 
 def _safe_decimal(val: Any) -> Decimal:
     if val is None:
-        return Decimal("0")
+        return Decimal(0)
     s = str(val).strip().replace(",", "")
     if not s or s.lower() == "nan":
-        return Decimal("0")
+        return Decimal(0)
     try:
         return Decimal(s)
     except (InvalidOperation, TypeError, ValueError):
-        return Decimal("0")
+        return Decimal(0)
 
 
-def is_non_pnl_transaction(txn: Dict[str, Any]) -> bool:
+def is_non_pnl_transaction(txn: dict[str, Any]) -> bool:
     """Check if transaction is a non-P&L flow (transfer, top-up, card repayment, reversal)."""
     txn_type = str(txn.get("type", "")).lower()
     if txn_type == "transfer":
@@ -108,7 +107,7 @@ def map_category_to_frs105(category_name: str, description: str = "") -> str:
         return "Administrative Expenses"
 
 
-def extract_firefly_data(fy_start: str, fy_end: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def extract_firefly_data(fy_start: str, fy_end: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Fetch transactions and accounts from Firefly III for date range [fy_start, fy_end]."""
     endpoint = f"api/firefly/transactions?since={fy_start}&until={fy_end}"
     log.info("Fetching transactions from Firefly III: %s", endpoint)
@@ -116,7 +115,7 @@ def extract_firefly_data(fy_start: str, fy_end: str) -> Tuple[List[Dict[str, Any
     res = mcp_firefly.call(endpoint)
     data = res.get("data", []) if isinstance(res, dict) else []
 
-    parsed_txns: List[Dict[str, Any]] = []
+    parsed_txns: list[dict[str, Any]] = []
     for item in data:
         splits = item.get("attributes", {}).get("transactions", [])
         for split in splits:
@@ -139,13 +138,13 @@ def extract_firefly_data(fy_start: str, fy_end: str) -> Tuple[List[Dict[str, Any
     return parsed_txns, {"accounts_count": len(accounts_data)}
 
 
-def build_trial_balance_csv(transactions: List[Dict[str, Any]]) -> str:
+def build_trial_balance_csv(transactions: list[dict[str, Any]]) -> str:
     """Filter non-P&L transactions and generate a CSV string for trial balance input."""
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["Date", "Description", "Paid Out", "Paid In", "Category", "Type"])
 
-    total_revenue = Decimal("0")
+    total_revenue = Decimal(0)
 
     for t in transactions:
         if is_non_pnl_transaction(t):
@@ -180,7 +179,7 @@ def build_trial_balance_csv(transactions: List[Dict[str, Any]]) -> str:
 
 def build_entity_yaml(fy_start: str, fy_end: str, total_revenue: Decimal, output_mode: str = "web_filing") -> str:
     """Generate YAML entity config with auto-detected dormant status."""
-    dormant = total_revenue == Decimal("0")
+    dormant = total_revenue == Decimal(0)
 
     entity_config = {
         "company": {
@@ -201,7 +200,7 @@ def build_entity_yaml(fy_start: str, fy_end: str, total_revenue: Decimal, output
     return str(yaml.dump(entity_config, sort_keys=False))
 
 
-def generate_from_firefly(fy_start: str, fy_end: str, output_mode: str = "web_filing") -> Tuple[str, str, bool]:
+def generate_from_firefly(fy_start: str, fy_end: str, output_mode: str = "web_filing") -> tuple[str, str, bool]:
     """Execute complete Firefly extraction workflow.
 
     Returns:
@@ -209,8 +208,8 @@ def generate_from_firefly(fy_start: str, fy_end: str, output_mode: str = "web_fi
     """
     txns, _ = extract_firefly_data(fy_start, fy_end)
 
-    total_revenue = Decimal("0")
-    filtered_txns: List[Dict[str, Any]] = []
+    total_revenue = Decimal(0)
+    filtered_txns: list[dict[str, Any]] = []
 
     for t in txns:
         if is_non_pnl_transaction(t):
@@ -223,6 +222,6 @@ def generate_from_firefly(fy_start: str, fy_end: str, output_mode: str = "web_fi
 
     csv_str = build_trial_balance_csv(filtered_txns)
     yaml_str = build_entity_yaml(fy_start, fy_end, total_revenue, output_mode)
-    dormant = total_revenue == Decimal("0")
+    dormant = total_revenue == Decimal(0)
 
     return csv_str, yaml_str, dormant

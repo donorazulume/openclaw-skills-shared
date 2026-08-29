@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import pathlib
+import sys
 from typing import Any, Dict, Optional
 
 _LIB_DIR = str(pathlib.Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-from token_resolver import resolve_secret  # noqa: E402
+from token_resolver import resolve_secret
 
 log = logging.getLogger("openclaw.mcp_adapter_factory")
 
@@ -50,13 +50,15 @@ MCP_SERVICES = {
 }
 
 
-def resolve_service_config(service_name: str) -> Dict[str, str]:
+def resolve_service_config(service_name: str) -> dict[str, str]:
     """Resolve base URL and bearer token for an MCP service."""
     srv = MCP_SERVICES.get(service_name.lower())
     if not srv:
         raise ValueError(f"Unknown MCP service: {service_name}")
 
-    base_url = os.environ.get(srv["url_env"], srv["default_url"]).rstrip("/")
+    url_env = str(srv.get("url_env", ""))
+    default_url = str(srv.get("default_url", ""))
+    base_url = (os.environ.get(url_env) or default_url).rstrip("/")
     
     token = None
     agent = os.environ.get("OPENCLAW_AGENT_NAME", "roho").upper()
@@ -75,13 +77,13 @@ def resolve_service_config(service_name: str) -> Dict[str, str]:
 def is_langchain_adapter_available() -> bool:
     """Check if langchain_mcp_adapters package is installed."""
     try:
-        import langchain_mcp_adapters  # type: ignore # noqa: F401
+        import langchain_mcp_adapters  # type: ignore
         return True
     except ImportError:
         return False
 
 
-def call_mcp_tool(service_name: str, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
+def call_mcp_tool(service_name: str, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
     """Unified entrypoint to invoke an MCP tool on an openclaw MCP service.
     
     Uses langchain-mcp-adapters when installed, or falls back to standard HTTP JSON-RPC dispatch.
@@ -104,21 +106,22 @@ def call_mcp_tool(service_name: str, tool_name: str, arguments: Optional[Dict[st
     if is_langchain_adapter_available():
         try:
             import asyncio
+
             from langchain_mcp_adapters.client import MultiServerMCPClient
 
             async def _run_adapter() -> Any:
-                async with MultiServerMCPClient({
+                client: Any = MultiServerMCPClient({
                     srv_name: {
                         "transport": "streamable_http",
                         "url": cfg["mcp_url"],
                         "headers": headers,
                     }
-                }) as client:
-                    tools = await client.get_tools()
-                    target_tool = next((t for t in tools if t.name == tool_name), None)
-                    if target_tool:
-                        res = await target_tool.ainvoke(arguments or {})
-                        return res
+                })
+                tools = await client.get_tools()
+                target_tool = next((t for t in tools if t.name == tool_name), None)
+                if target_tool:
+                    res = await target_tool.ainvoke(arguments or {})
+                    return res
                 return None
 
             try:
@@ -138,8 +141,9 @@ def call_mcp_tool(service_name: str, tool_name: str, arguments: Optional[Dict[st
             log.warning("langchain-mcp-adapters invocation failed for %s:%s (%s), falling back to JSON-RPC HTTP", srv_name, tool_name, exc)
 
     # Standard JSON-RPC POST fallback
-    import requests
     import uuid
+
+    import requests
 
     payload = {
         "jsonrpc": "2.0",

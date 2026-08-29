@@ -589,7 +589,7 @@ def cron_refresh_and_sync_doppler(*, force: bool, dry_run: bool) -> tuple[dict[s
         return None, False, str(exc)
 
 
-def get_drive_service_account_credentials():  # noqa: ANN201 — google auth type
+def get_drive_service_account_credentials():
     """Phase F (SPEC-GAUTH-001): Drive shared-folder ingestion via GCP SA."""
     from google.oauth2 import service_account
 

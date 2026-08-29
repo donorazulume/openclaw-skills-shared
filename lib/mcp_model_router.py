@@ -17,10 +17,10 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_REGISTRY_PATH = REPO_ROOT / "config" / "model-registry.json"
@@ -46,8 +46,8 @@ class CircuitBreaker:
     def __init__(self, failure_threshold: int = 3, cooldown_seconds: int = 300) -> None:
         self.failure_threshold = failure_threshold
         self.cooldown_seconds = cooldown_seconds
-        self._failures: Dict[str, int] = {}
-        self._cooldown_until: Dict[str, float] = {}
+        self._failures: dict[str, int] = {}
+        self._cooldown_until: dict[str, float] = {}
 
     def is_available(self, provider_id: str) -> bool:
         now = time.time()
@@ -82,7 +82,7 @@ class ModelRouter:
     ) -> None:
         self.agent_name = agent_name
         self.registry_path = Path(registry_path) if registry_path else DEFAULT_REGISTRY_PATH
-        self.registry_data: Dict[str, Any] = {}
+        self.registry_data: dict[str, Any] = {}
         self.circuit_breaker = CircuitBreaker()
         self.daily_spend_usd = 0.0
         self.load_registry()
@@ -101,13 +101,55 @@ class ModelRouter:
         self.budget_kill_switch = defaults.get("budgetKillSwitch", False)
         self.daily_budget_ceiling_usd = defaults.get("dailyBudgetUsdCeiling", 50.0)
 
+    def _is_valid_registry(self, path: Path) -> bool:
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return isinstance(data, dict) and "providers" in data
+        except Exception:
+            pass
+        return False
+
     def load_registry(self) -> None:
-        if not self.registry_path.is_file():
-            raise FileNotFoundError(f"Model registry file not found at {self.registry_path}")
+        target_path = self.registry_path
+        if not self._is_valid_registry(target_path):
+            candidates: list[Path] = []
+            env_override = os.environ.get("OPENCLAW_MODEL_REGISTRY_PATH")
+            if env_override:
+                candidates.append(Path(env_override))
+            candidates.extend([
+                DEFAULT_REGISTRY_PATH,
+                Path("/opt/openclaw/templates/config/model-registry.json"),
+                Path("/opt/openclaw/config/model-registry.json"),
+                Path("/home/node/.openclaw/config/model-registry.json"),
+                Path("/home/node/amara/.openclaw/config/model-registry.json"),
+                Path("/home/node/rob/.openclaw/config/model-registry.json"),
+                REPO_ROOT / "config" / "model-registry.json",
+                Path.cwd() / "config" / "model-registry.json",
+            ])
+            found: Path | None = None
+            for cand in candidates:
+                if self._is_valid_registry(cand):
+                    found = cand
+                    break
+            if found:
+                self.registry_path = found
+                # Self-heal target_path if it was invalid or empty
+                try:
+                    if target_path != found and not self._is_valid_registry(target_path):
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+                        target_path.write_text(found.read_text(encoding="utf-8"), encoding="utf-8")
+                        self.registry_path = target_path
+                except Exception:
+                    pass
+            else:
+                raise FileNotFoundError(f"Model registry file not found or invalid at {target_path}")
+
         with open(self.registry_path, "r", encoding="utf-8") as f:
             self.registry_data = json.load(f)
 
-    def onboard_provider(self, provider_id: str, provider_config: Dict[str, Any]) -> bool:
+    def onboard_provider(self, provider_id: str, provider_config: dict[str, Any]) -> bool:
         """Dynamically add or update a provider in the model registry."""
         providers = self.registry_data.setdefault("providers", {})
         providers[provider_id] = provider_config
@@ -122,13 +164,13 @@ class ModelRouter:
             return True
         return False
 
-    def _resolve_secret_key(self, provider_id: str, provider_info: Dict[str, Any]) -> str:
+    def _resolve_secret_key(self, provider_id: str, provider_info: dict[str, Any]) -> str:
         per_agent = provider_info.get("perAgentEnvVars", {})
         if self.agent_name in per_agent and per_agent[self.agent_name] in os.environ:
             return per_agent[self.agent_name]
         return provider_info.get("secretEnvVar", "API_KEY")
 
-    def _spec_to_provider_model(self, full_spec: str) -> Tuple[str, str]:
+    def _spec_to_provider_model(self, full_spec: str) -> tuple[str, str]:
         if "/" in full_spec:
             p, m = full_spec.split("/", 1)
             return p, m
@@ -266,7 +308,7 @@ class ModelRouter:
         tokens_in: int = 0,
         tokens_out: int = 0,
         trigger: str = "agent_request",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Record dispatch outcome, update circuit breaker & budget, return telemetry event."""
         if 200 <= http_status < 300:
             self.circuit_breaker.record_success(decision.provider)
@@ -300,7 +342,33 @@ class ModelRouter:
         self.ingest_telemetry_open_brain(event)
         return event
 
-    def ingest_telemetry_open_brain(self, event: Dict[str, Any]) -> None:
+    def dispatch_with_retry(
+        self,
+        func: Any,
+        *args: Any,
+        max_retries: int = 3,
+        backoff_sec: float = 2.0,
+        provider_hint: str = "unknown",
+        **kwargs: Any,
+    ) -> Any:
+        """Issue #514: Execute LLM request with exponential backoff retry and enriched error logging."""
+        last_exc: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = func(*args, **kwargs)
+                return result
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_retries:
+                    time.sleep(backoff_sec * attempt)
+
+        err_msg = (
+            f"LLM request failed (provider={provider_hint}, status={getattr(last_exc, 'status_code', 'unknown')}, "
+            f"attempts={max_retries}): {last_exc}"
+        )
+        raise RuntimeError(err_msg) from last_exc
+
+    def ingest_telemetry_open_brain(self, event: dict[str, Any]) -> None:
         """Ingest llm_dispatch event into Open Brain collection open_brain."""
         try:
             from mcp_comms import query_open_brain  # type: ignore
@@ -315,7 +383,7 @@ class ModelRouter:
             # Silent fallback if open_brain service is offline or un-imported
             pass
 
-    def get_health_status(self) -> Dict[str, Any]:
+    def get_health_status(self) -> dict[str, Any]:
         providers = self.registry_data.get("providers", {})
         status = {}
         for p_id, p_info in providers.items():

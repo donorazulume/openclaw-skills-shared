@@ -7,6 +7,7 @@ to prevent false negatives caused by stale or drifted local clones.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from typing import Any
@@ -15,7 +16,6 @@ from typing import Any
 class StaleCloneError(RuntimeError):
     """Raised when validation preflight detects a stale or dirty local clone."""
 
-    pass
 
 
 def get_local_git_info() -> dict[str, Any]:

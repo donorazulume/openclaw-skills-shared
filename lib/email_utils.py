@@ -9,6 +9,7 @@ produce consistent multipart/alternative emails.
 from __future__ import annotations
 
 import re
+from typing import Any, cast
 
 try:
     import bleach  # type: ignore[import-not-found] # pyright: ignore[reportMissingImports]
@@ -75,9 +76,9 @@ def markdown_to_html(md_text: str) -> str:
     if bleach is not None:
         cleaned = bleach.clean(
             raw_html,
-            tags=_BLEACH_ALLOWED_TAGS,
-            attributes=_BLEACH_ALLOWED_ATTRIBUTES,
-            protocols=_BLEACH_ALLOWED_PROTOCOLS,
+            tags=cast(Any, _BLEACH_ALLOWED_TAGS),
+            attributes=cast(Any, _BLEACH_ALLOWED_ATTRIBUTES),
+            protocols=cast(Any, _BLEACH_ALLOWED_PROTOCOLS),
             strip=True,
         )
         return str(cleaned)

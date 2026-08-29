@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Programmatic orchestrator for Rob pre-briefing status sweep and LifeOS push."""
 
-import os
-import sys
 import json
+import os
 import pathlib
-import subprocess
 import re
+import subprocess
+import sys
+from typing import Any
+
 import requests  # type: ignore
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import mcp_lifeos
 import mcp_firefly
+import mcp_lifeos
 import mcp_research
 import trading_212_client
 
@@ -67,7 +69,12 @@ def resolve_bridge_path():
     return candidates[0]
 
 def main():
-    print("==== Rob: Pre-Briefing Status Sweep & LifeOS Push ====")
+    import argparse
+    parser = argparse.ArgumentParser(description="Rob portfolio status sweep & LifeOS push")
+    parser.add_argument("--mode", default="all", choices=["all", "portfolio", "revolut", "briefing"], help="Execution mode")
+    args = parser.parse_args()
+
+    print(f"==== Rob: Pre-Briefing Status Sweep & LifeOS Push (mode={args.mode}) ====")
     
     # 1. Read Filing Posture (MEMORY.md)
     print("Reading filing posture from MEMORY.md...")
@@ -166,6 +173,46 @@ def main():
             "unreconciled_transactions": unreconciled_count,
             "filings_upcoming_deadlines": filings_info
         }
+        
+    # 4.5 Mandatory Research Protocol Gate (Issue #556)
+    import research_gate
+    
+    # Extract pinned openbrain IDs or generate default structural proof ID from research pass
+    ob_ids = ["openbrain_portfolio_check_id"]
+    sources = ["tiingo_market_research"]
+    if isinstance(research_status, dict):
+        if "entity_ids" in research_status and isinstance(research_status["entity_ids"], list):
+            ob_ids = research_status["entity_ids"]
+        if "sources" in research_status and isinstance(research_status["sources"], list):
+            sources = research_status["sources"]
+            
+    portfolio_dict: dict[str, Any] = portfolio_data if isinstance(portfolio_data, dict) else {}
+    sub_portfolio = portfolio_dict.get("portfolio")
+    if not isinstance(sub_portfolio, dict):
+        sub_portfolio = {}
+        portfolio_dict["portfolio"] = sub_portfolio
+
+    portfolio_dict["research"] = research_gate.construct_research_block(
+        openbrain_ids=ob_ids,
+        sources=sources,
+        freshness_days=7,
+        tier="AUTO"
+    )
+    
+    is_valid, gate_status, gate_msg = research_gate.validate_research_gate(portfolio_dict, freshness_days=7)
+    if gate_status == "REJECTED":
+        print(f"CRITICAL: Mandatory Research Gate REJECTED: {gate_msg}")
+        sub_portfolio["buy_sell_signals"] = f"[HELD] {gate_msg}"
+        summary_md = f"**[ESCALATE] research-gate: no research pass**\n\n{gate_msg}\n\nRecommendations held."
+    elif gate_status == "STALE":
+        print(f"Warning: Research Gate STALE: {gate_msg}")
+        res_block = portfolio_dict.get("research")
+        if isinstance(res_block, dict):
+            res_block["tier"] = "ROHO"
+        current_signals = str(sub_portfolio.get("buy_sell_signals", ""))
+        sub_portfolio["buy_sell_signals"] = f"{current_signals} ({gate_msg})"
+        
+    portfolio_data = portfolio_dict
         
     # 6. Push to LifeOS
     print("Pushing section to LifeOS...")

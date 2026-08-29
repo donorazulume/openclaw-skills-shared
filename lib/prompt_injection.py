@@ -9,7 +9,7 @@ INVISIBLE_CHARS_RE = re.compile(
 
 # 22+ regex patterns grouped by category and severity
 # Note: we use word boundaries where appropriate to avoid false positives on standard text.
-SIGNATURES: Dict[str, Dict[str, Any]] = {
+SIGNATURES: dict[str, dict[str, Any]] = {
     "INSTRUCTION_OVERRIDE": {
         "severity": "critical",
         "patterns": [
@@ -113,7 +113,7 @@ def strip_invisible_chars(text: str) -> str:
     return INVISIBLE_CHARS_RE.sub("", text)
 
 
-def sanitize_text(text: str, is_trusted: bool = False) -> Tuple[str, List[Dict[str, str]]]:
+def sanitize_text(text: str, is_trusted: bool = False) -> tuple[str, list[dict[str, str]]]:
     """
     Sanitizes untrusted text by stripping invisible characters and neutralizing critical patterns.
     

@@ -13,7 +13,7 @@ from typing import Any
 _LIB_DIR = str(pathlib.Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
-from token_resolver import resolve_secret  # noqa: E402
+from token_resolver import resolve_secret
 
 log = logging.getLogger("openclaw.mcp_orchestrator")
 

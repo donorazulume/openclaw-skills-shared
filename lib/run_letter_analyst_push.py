@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Programmatic orchestrator for Letter Analyst document sweep and LifeOS push."""
 
-import os
-import sys
 import json
+import os
 import pathlib
 import sqlite3
+import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import mcp_lifeos
+
 
 def main():
     print("==== Letter Analyst: Document Sweep & LifeOS Push ====")

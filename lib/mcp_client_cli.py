@@ -1,9 +1,10 @@
-import anyio
+import logging
 import os
 import sys
-import logging
-from mcp.server.stdio import stdio_server
+
+import anyio
 from mcp.client.sse import sse_client
+from mcp.server.stdio import stdio_server
 
 # Diagnostic/info logs must go to stderr. Stdout is reserved exclusively for JSON-RPC messages.
 logging.basicConfig(level=logging.WARNING, stream=sys.stderr)

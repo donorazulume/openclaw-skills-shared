@@ -10,20 +10,16 @@ import datetime
 import json
 import logging
 import os
+import pathlib
 import re
 import sys
-import pathlib
 from typing import Any
 
 _LIB_DIR = str(pathlib.Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-<<<<<<< HEAD
-import mcp_trade212  # noqa: E402
-=======
 import mcp_trade212
->>>>>>> 99e9ff0 (fix(tests): isolate module namespace and mock exceptions in skills-shared)
 
 log = logging.getLogger("openclaw.trading_212_client")
 
@@ -81,9 +77,6 @@ def get_portfolio_positions(timeout: float = DEFAULT_TIMEOUT_SEC) -> list[dict[s
         avg_price = float(item.get("averagePrice") or item.get("average_price") or item.get("cost_basis") or 0.0)
         curr_price = float(item.get("currentPrice") or item.get("current_price") or avg_price)
         ppl = float(item.get("ppl") or item.get("unrealized_pnl") or ((curr_price - avg_price) * quantity))
-<<<<<<< HEAD
-        market_val = float(item.get("marketValue") or item.get("market_value") or (quantity * curr_price))
-=======
         raw_curr = str(item.get("currency") or "").upper()
         is_pence = (
             raw_curr in ("GBX", "GBP")
@@ -102,7 +95,6 @@ def get_portfolio_positions(timeout: float = DEFAULT_TIMEOUT_SEC) -> list[dict[s
             avg_price = avg_price / 100.0
         if is_pence and curr_price > 100.0:
             curr_price = curr_price / 100.0
->>>>>>> 99e9ff0 (fix(tests): isolate module namespace and mock exceptions in skills-shared)
 
         total_invested += market_val
         positions.append({
@@ -154,6 +146,14 @@ def get_transaction_history(limit: int = 50, timeout: float = DEFAULT_TIMEOUT_SE
     return []
 
 
+def get_funding_transactions(limit: int = 100, timeout: float = DEFAULT_TIMEOUT_SEC) -> dict[str, Any]:
+    """Fetch capital funding transactions (deposits/withdrawals) from openclaw-mcp-trade212."""
+    res = mcp_trade212.call("api/trade212/transactions/funding", timeout=timeout)
+    if isinstance(res, dict) and "data" in res:
+        return res["data"] if isinstance(res["data"], dict) else res
+    return res if isinstance(res, dict) else {}
+
+
 def get_live_portfolio_snapshot(timeout: float = DEFAULT_TIMEOUT_SEC) -> dict[str, Any]:
     """Retrieve full live portfolio data snapshot from openclaw-mcp-trade212."""
     account = get_account_summary(timeout=timeout)
@@ -162,6 +162,7 @@ def get_live_portfolio_snapshot(timeout: float = DEFAULT_TIMEOUT_SEC) -> dict[st
 
     total_val = float(account.get("total") or account.get("invested", 0.0) + account.get("cash", 0.0))
     total_ppl = float(account.get("ppl") or account.get("result") or sum(p["ppl"] for p in positions))
+    net_supplied = account.get("netSupplied") if account.get("netSupplied") is not None else account.get("net_supplied")
 
     return {
         "source": "live_trading212",
@@ -175,6 +176,8 @@ def get_live_portfolio_snapshot(timeout: float = DEFAULT_TIMEOUT_SEC) -> dict[st
             "currency": str(account.get("currency", "GBP")),
             "ppl": total_ppl,
             "result": float(account.get("result", total_ppl)),
+            "net_supplied": net_supplied,
+            "netSupplied": net_supplied,
         },
         "positions": positions,
         "open_orders": orders,

@@ -3,9 +3,9 @@
 
 import argparse
 import json
-import sys
 import os
 import pathlib
+import sys
 
 # Ensure we can resolve token_resolver and other imports from this directory
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))

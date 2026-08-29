@@ -30,17 +30,17 @@ class AgentResponsePayload(TypedDict, total=False):
     agent_id: str
     channel_id: str
     channel_type: str  # "O", "P", "D"
-    target_agent_id: Optional[str]
-    root_id: Optional[str]
+    target_agent_id: str | None
+    root_id: str | None
     raw_content: str
 
 
 class MattermostPostPayload(TypedDict, total=False):
     channel_id: str
-    root_id: Optional[str]
+    root_id: str | None
     message: str
-    props: Optional[Dict[str, Any]]
-    overflow_posts: Optional[List[Dict[str, Any]]]
+    props: dict[str, Any] | None
+    overflow_posts: list[dict[str, Any]] | None
 
 
 def sanitize_output(content: str) -> str:
@@ -74,7 +74,7 @@ def repair_markdown(content: str) -> str:
 def inject_a2a_mention(
     content: str,
     channel_type: str,
-    target_agent_id: Optional[str],
+    target_agent_id: str | None,
 ) -> str:
     """Inject mandatory @<target_agent_handle> at index 0 for A2A coordination (REQ-A2A-001)."""
     if channel_type in ("O", "P") and target_agent_id:
@@ -93,7 +93,7 @@ def inject_a2a_mention(
 def normalize_headers(content: str, force_h3: bool = False, strip_headers: bool = False) -> str:
     """Format headers: strip H1/H2/H3 for DMs/Short-form or convert H1/H2 to H3 for Medium/Long form."""
     lines = content.splitlines()
-    new_lines: List[str] = []
+    new_lines: list[str] = []
 
     for line in lines:
         stripped = line.strip()
@@ -180,7 +180,7 @@ def format_agent_response(payload: AgentResponsePayload) -> MattermostPostPayloa
 
             if not re.search(r"(?i)>\s*\*\*TL;DR:\*\*", content):
                 # Auto-generate TL;DR from first paragraph
-                lines = [line.strip() for line in content.splitlines() if line.strip() and not line.strip().startswith("#")]
+                lines = [l.strip() for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
                 tldr_text = lines[0][:150] + "..." if lines else "Summary of response below."
                 tldr_quote = f"> **TL;DR:** {tldr_text}\n\n"
                 content = tldr_quote + content
@@ -191,13 +191,13 @@ def format_agent_response(payload: AgentResponsePayload) -> MattermostPostPayloa
             content = ensure_code_language_tags(content)
 
             if not re.search(r"(?i)>\s*\*\*TL;DR:\*\*", content):
-                lines = [line.strip() for line in content.splitlines() if line.strip() and not line.strip().startswith("#")]
+                lines = [l.strip() for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
                 tldr_text = lines[0][:150] + "..." if lines else "Full breakdown attached in thread."
                 tldr_quote = f"> **TL;DR:** {tldr_text}\n\n"
                 content = tldr_quote + content
 
     # 4. Overflow Handling (> 4000 chars / ERR_MSG_TOO_LONG)
-    overflow_posts: List[Dict[str, Any]] = []
+    overflow_posts: list[dict[str, Any]] = []
     if len(content) > MAX_POST_CHARS:
         log.warning("Message length %d exceeds MAX_POST_CHARS (%d) — splitting into thread", len(content), MAX_POST_CHARS)
 

@@ -35,8 +35,8 @@ class M365MCPError(RuntimeError):
 try:
     from token_resolver import resolve_secret
 except ImportError:
-    def resolve_secret(k: str) -> str | None:
-        v = os.environ.get(k, "").strip()
+    def resolve_secret(key_name: str) -> str | None:
+        v = os.environ.get(key_name, "").strip()
         return v if v else None
 
 
