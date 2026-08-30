@@ -166,8 +166,13 @@ class ModelRouter:
 
     def _resolve_secret_key(self, provider_id: str, provider_info: dict[str, Any]) -> str:
         per_agent = provider_info.get("perAgentEnvVars", {})
-        if self.agent_name in per_agent and per_agent[self.agent_name] in os.environ:
-            return per_agent[self.agent_name]
+        if self.agent_name in per_agent:
+            agent_var = per_agent[self.agent_name]
+            if agent_var in os.environ:
+                return agent_var
+            if provider_info.get("secretEnvVar") in os.environ:
+                return provider_info.get("secretEnvVar", "API_KEY")
+            return agent_var
         return provider_info.get("secretEnvVar", "API_KEY")
 
     def _spec_to_provider_model(self, full_spec: str) -> tuple[str, str]:
@@ -184,6 +189,31 @@ class ModelRouter:
         """Resolve route for a given task class or model override."""
         routes = self.registry_data.get("routes", {})
         route_info = routes.get(task_class, routes.get("fastchat", {}))
+
+        # Agent ownership validation (SPEC-AGENT-MODELROUTE / Issue #620)
+        allowed_agents = route_info.get("allowedAgents")
+        if allowed_agents and not override_model:
+            allowed_set = {str(a).lower() for a in allowed_agents}
+            caller_agent = self.agent_name.lower()
+            if caller_agent not in allowed_set:
+                # Refuse governed route access to non-authorized agent
+                # Route safely to neutral fastchat fallback
+                fastchat_route = routes.get("fastchat", {})
+                primary_spec = fastchat_route.get("primary", "openai-compatible/deepseek-v4-flash")
+                p, m = self._spec_to_provider_model(primary_spec)
+                p_info = self.registry_data.get("providers", {}).get(p, {})
+                secret_key = self._resolve_secret_key(p, p_info)
+                return DispatchDecision(
+                    agent=self.agent_name,
+                    route="route://fastchat",
+                    provider=p,
+                    model=m,
+                    full_model_spec=primary_spec,
+                    decision_type="fallback",
+                    pinned=False,
+                    secret_env_var=secret_key,
+                    max_cost_per_call_usd=fastchat_route.get("maxCostPerCallUsd", 0.05),
+                )
 
         route_uri = f"route://{task_class}"
         is_pinned = route_info.get("pinned", False)
@@ -383,6 +413,54 @@ class ModelRouter:
             # Silent fallback if open_brain service is offline or un-imported
             pass
 
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        task_class: str = "fastchat",
+        temperature: float = 0.1,
+        max_tokens: int = 4096,
+        override_model: str | None = None,
+    ) -> str:
+        """High-level completion dispatch helper routing to resolved provider or gateway."""
+        decision = self.resolve_route(task_class=task_class, override_model=override_model)
+        start_time = time.time()
+
+        gateway_url = os.environ.get("DEEPSEEK_GATEWAY_URL", "http://openclaw:18789/v1/chat/completions")
+        token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        payload = {
+            "model": decision.full_model_spec,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        import requests  # type: ignore
+
+        def _do_post():
+            resp = requests.post(gateway_url, json=payload, headers=headers, timeout=60)
+            resp.raise_for_status()
+            return resp
+
+        try:
+            resp = self.dispatch_with_retry(_do_post, max_retries=3, provider_hint=decision.provider)
+            data = resp.json()
+            latency_ms = int((time.time() - start_time) * 1000)
+            usage = data.get("usage", {})
+            tokens_in = usage.get("prompt_tokens", 0)
+            tokens_out = usage.get("completion_tokens", 0)
+            self.record_dispatch_outcome(decision, http_status=200, latency_ms=latency_ms, tokens_in=tokens_in, tokens_out=tokens_out)
+            if "choices" in data and len(data["choices"]) > 0:
+                return data["choices"][0]["message"].get("content", "")
+            return ""
+        except Exception as exc:
+            latency_ms = int((time.time() - start_time) * 1000)
+            self.record_dispatch_outcome(decision, http_status=500, latency_ms=latency_ms)
+            raise exc
+
     def get_health_status(self) -> dict[str, Any]:
         providers = self.registry_data.get("providers", {})
         status = {}
@@ -400,3 +478,4 @@ class ModelRouter:
             "budget_kill_switch": self.budget_kill_switch,
             "providers": status,
         }
+
