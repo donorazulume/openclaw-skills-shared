@@ -37,7 +37,17 @@ def _bearer() -> str:
     if not tok:
         tok = resolve_secret(f"MCP_TOKEN_{agent}")
     if not tok:
+        tok = resolve_secret(f"MCP_TOKEN_PROD_{agent}")
+    if not tok:
+        tok = resolve_secret(f"CLICKUP_API_KEY_{agent}")
+    if not tok:
+        tok = resolve_secret("CLICKUP_API_KEY")
+    if not tok:
+        tok = resolve_secret("MCP_TOKEN_ORCHESTRATOR")
+    if not tok:
         tok = resolve_secret("MCP_TOKEN_ORCH_ROHO")
+    if not tok:
+        tok = resolve_secret("MCP_TOKEN_PROD_ROHO")
     if not tok:
         tok = resolve_secret("MCP_TOKEN_ROHO")
     if not tok:
@@ -69,11 +79,19 @@ def call(tool: str, arguments: dict[str, Any] | None = None, *, timeout: float =
         "method": "tools/call",
         "params": {"name": tool, "arguments": arguments or {}},
     }
-    try:
-        resp = requests.post(url, json=body, headers=_headers(), timeout=timeout)
-    except requests.RequestException as exc:
-        # Fallback direct FastAPI endpoint or mock local invocation if standalone
-        raise OrchestratorMCPError(f"MCP Orchestrator unreachable at {url}: {exc}", status=0) from exc
+    urls_to_try = [url, "http://127.0.0.1:8109/mcp", "http://localhost:8109/mcp"]
+    resp = None
+    last_exc = None
+    for u in urls_to_try:
+        try:
+            resp = requests.post(u, json=body, headers=_headers(), timeout=timeout)
+            break
+        except requests.RequestException as exc:
+            last_exc = exc
+            continue
+
+    if resp is None:
+        raise OrchestratorMCPError(f"MCP Orchestrator unreachable at {url}: {last_exc}", status=0)
 
     if resp.status_code == 401:
         raise OrchestratorMCPError("MCP Orchestrator rejected bearer token", status=401)

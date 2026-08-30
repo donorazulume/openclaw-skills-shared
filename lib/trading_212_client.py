@@ -154,6 +154,46 @@ def get_funding_transactions(limit: int = 100, timeout: float = DEFAULT_TIMEOUT_
     return res if isinstance(res, dict) else {}
 
 
+def _sync_daily_state(total_val: float) -> None:
+    """Ensure trade212_daily_state.json is updated on daily portfolio fetch (Issue #658)."""
+    home = os.environ.get("HOME", "/home/node")
+    candidates = [
+        pathlib.Path(home) / ".openclaw" / "workspace" / "trade212_daily_state.json",
+        pathlib.Path(home) / "rob" / ".openclaw" / "workspace" / "trade212_daily_state.json",
+        pathlib.Path("/workspace/trade212_daily_state.json"),
+    ]
+    today_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
+
+    for p in candidates:
+        try:
+            if p.parent.is_dir() and os.access(p.parent, os.W_OK):
+                update_needed = True
+                if p.is_file():
+                    try:
+                        curr = json.loads(p.read_text(encoding="utf-8"))
+                        if curr.get("date") == today_str and "start_of_day_value" in curr:
+                            update_needed = False
+                    except Exception:
+                        update_needed = True
+                if update_needed:
+                    p.write_text(
+                        json.dumps(
+                            {
+                                "date": today_str,
+                                "start_of_day_value": total_val,
+                                "last_synced_ts": now_ts,
+                                "last_synced_iso": _now_iso(),
+                            },
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                break
+        except Exception:
+            continue
+
+
 def get_live_portfolio_snapshot(timeout: float = DEFAULT_TIMEOUT_SEC) -> dict[str, Any]:
     """Retrieve full live portfolio data snapshot from openclaw-mcp-trade212."""
     account = get_account_summary(timeout=timeout)
@@ -163,6 +203,10 @@ def get_live_portfolio_snapshot(timeout: float = DEFAULT_TIMEOUT_SEC) -> dict[st
     total_val = float(account.get("total") or account.get("invested", 0.0) + account.get("cash", 0.0))
     total_ppl = float(account.get("ppl") or account.get("result") or sum(p["ppl"] for p in positions))
     net_supplied = account.get("netSupplied") if account.get("netSupplied") is not None else account.get("net_supplied")
+
+    # Issue #658: Sync daily state file on live fetch
+    if total_val > 0:
+        _sync_daily_state(total_val)
 
     return {
         "source": "live_trading212",
