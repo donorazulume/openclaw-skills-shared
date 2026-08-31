@@ -42,7 +42,7 @@ MCP_SERVICES = {
         "endpoint": "/mcp",
     },
     "productivity": {
-        "default_url": "http://openclaw-mcp-productivity:8104",
+        "default_url": "http://openclaw-mcp-sysadmin:8104",
         "url_env": "MCP_PRODUCTIVITY_URL",
         "token_envs": ["MCP_TOKEN_PROD_ROHO", "MCP_PRODUCTIVITY_TOKEN", "MCP_TOKEN_ROHO"],
         "endpoint": "/mcp",
