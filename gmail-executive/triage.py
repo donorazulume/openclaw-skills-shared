@@ -133,10 +133,25 @@ def _call(tool: str, **arguments: Any) -> dict[str, Any]:
     return result if isinstance(result, dict) else {}
 
 
-def expert_judgment_from_headers(subject: str, from_addr: str) -> str | None:
+def _extract_email_address(from_val: Any) -> str:
+    """Extract flat email string from various message payload structures."""
+    if isinstance(from_val, str):
+        return from_val
+    if isinstance(from_val, dict):
+        ea = from_val.get("emailAddress")
+        if isinstance(ea, dict):
+            return str(ea.get("address") or "")
+        if isinstance(ea, str):
+            return ea
+        if "address" in from_val:
+            return str(from_val.get("address") or "")
+    return str(from_val or "")
+
+
+def expert_judgment_from_headers(subject: Any, from_addr: Any) -> str | None:
     """Classify message priority from header strings. Returns target category or None."""
-    s = subject.lower()
-    f = from_addr.lower()
+    s = str(subject or "").lower()
+    f = _extract_email_address(from_addr).lower()
 
     urgent_patterns = [
         r"\burgent\b", r"\bdeadline\b", r"\basap\b",
@@ -175,9 +190,11 @@ def expert_judgment_from_headers(subject: str, from_addr: str) -> str | None:
     return None
 
 
-def _rule_target(subject: str, from_addr: str) -> str | None:
+def _rule_target(subject: Any, from_addr: Any) -> str | None:
+    s = str(subject or "")
+    f = _extract_email_address(from_addr)
     for field, pattern, target_label in TRIAGE_RULES:
-        value = from_addr if field == "from" else subject
+        value = f if field == "from" else s
         if re.search(pattern, value, re.IGNORECASE):
             return target_label
     return None
@@ -467,13 +484,14 @@ def _process_messages_and_print_report(messages: list[dict[str, Any]]) -> None:
 
     email_records: list[dict[str, Any]] = []
     moved: dict[str, int] = {}
+    filing_errors: dict[str, int] = {}
 
     for msg in messages:
-        subject = msg.get("subject") or ""
-        from_dict = msg.get("from") or {}
+        subject = msg.get("subject", "")
+        from_dict = msg.get("from", {})
         from_addr = (from_dict.get("emailAddress", {}).get("address") if isinstance(from_dict, dict) else str(from_dict)) or msg.get("from_raw", "")
         snippet = msg.get("bodyPreview") or msg.get("snippet") or ""
-        cats = msg.get("categories") or []
+        cats = msg.get("categories", [])
 
         has_ets_cat = any(cat in ETS_LABELS for cat in cats)
         target = None
@@ -502,12 +520,29 @@ def _process_messages_and_print_report(messages: list[dict[str, Any]]) -> None:
             record["classification"] = classification
             record["importance"] = "high" if target in ("01_Action", "PARA/Areas") else importance
             source = msg.get("source", "google")
+            label_ok = False
             if source == "google":
-                _call("google_mail_label", message_id=msg["id"], add_labels=[target])
+                resp = _call("google_mail_label", message_id=msg["id"], add_labels=[target])
+                if isinstance(resp, dict) and not resp.get("error"):
+                    label_ok = True
+                else:
+                    err_msg = resp.get("error", {}) if isinstance(resp, dict) else str(resp)
+                    log.warning("Failed to apply label '%s' to msg %s: %s", target, msg["id"], err_msg)
+                    filing_errors[target] = filing_errors.get(target, 0) + 1
+                    record["filing_error"] = str(err_msg)
             else:
                 new_cats = list(set(cats + [target]))
-                _call("m365_mail_update_categories", message_id=msg["id"], categories=new_cats)
-            moved[target] = moved.get(target, 0) + 1
+                resp = _call("m365_mail_update_categories", message_id=msg["id"], categories=new_cats)
+                if isinstance(resp, dict) and not resp.get("error"):
+                    label_ok = True
+                else:
+                    err_msg = resp.get("error", {}) if isinstance(resp, dict) else str(resp)
+                    log.warning("Failed to apply m365 category '%s' to msg %s: %s", target, msg["id"], err_msg)
+                    filing_errors[target] = filing_errors.get(target, 0) + 1
+                    record["filing_error"] = str(err_msg)
+
+            if label_ok:
+                moved[target] = moved.get(target, 0) + 1
         else:
             record["label"] = cats[0] if cats else "INBOX"
             record["importance"] = "high" if any(c in ("01_Action", "PARA/Areas") for c in cats) else "normal"
@@ -550,13 +585,17 @@ def _process_messages_and_print_report(messages: list[dict[str, Any]]) -> None:
             log.warning("Failed ClickUp dispatch for email %s: %s", rec.get("id"), exc)
 
     skipped = sum(1 for r in email_records if r["label"] == "INBOX")
+    summary_dict: dict[str, Any] = {
+        "total_processed": len(messages),
+        "moved": moved,
+        "remained_inbox": skipped,
+    }
+    if filing_errors:
+        summary_dict["filing_errors"] = filing_errors
+
     print(json.dumps(
         {
-            "summary": {
-                "total_processed": len(messages),
-                "moved": moved,
-                "remained_inbox": skipped,
-            },
+            "summary": summary_dict,
             "emails": email_records,
         },
         indent=2,
@@ -565,12 +604,29 @@ def _process_messages_and_print_report(messages: list[dict[str, Any]]) -> None:
 
 def triage_report(limit: int = 15) -> None:
     """Triage messages and print a JSON report with previews for high priority."""
+    # Baseline history cursor if not present
+    triage_state_path = ".gmail_triage_state.json"
+    try:
+        state: dict[str, Any] = {}
+        if os.path.exists(triage_state_path):
+            with open(triage_state_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        if not state.get("latest_history_id"):
+            prof = _call("google_mail_profile")
+            hid = prof.get("history_id") or prof.get("historyId")
+            if hid:
+                state["latest_history_id"] = str(hid)
+                with open(triage_state_path, "w", encoding="utf-8") as f:
+                    json.dump(state, f, indent=2)
+    except Exception as exc:
+        log.debug("Could not baseline history cursor in triage_report: %s", exc)
+
     messages = _list_inbox_messages(top=limit)
     _process_messages_and_print_report(messages)
 
 
 def event_triage(history_id: str | None = None, limit: int = 15) -> None:
-    """Triage incoming messages delta triggered by PubSub event wake (Issue #634 & #653 / GET-E1)."""
+    """Triage incoming messages delta triggered by PubSub event wake (Issue #634, #653, #662 / GET-E1)."""
     triage_state_path = ".gmail_triage_state.json"
     state: dict[str, Any] = {}
     if os.path.exists(triage_state_path):
@@ -580,9 +636,23 @@ def event_triage(history_id: str | None = None, limit: int = 15) -> None:
         except Exception:
             state = {}
 
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state["last_wake"] = now_iso
+
     start_hid = history_id or state.get("latest_history_id")
     messages: list[dict[str, Any]] = []
     delta_queried = False
+
+    if not start_hid:
+        # Attempt to baseline cursor via google_mail_profile
+        try:
+            prof = _call("google_mail_profile")
+            hid = prof.get("history_id") or prof.get("historyId")
+            if hid:
+                start_hid = str(hid)
+                state["latest_history_id"] = start_hid
+        except Exception:
+            pass
 
     if start_hid:
         log.info("Fetching Gmail delta history starting from historyId=%s", start_hid)
@@ -620,8 +690,8 @@ def event_triage(history_id: str | None = None, limit: int = 15) -> None:
 
     _process_messages_and_print_report(messages)
 
-    state["last_run_at"] = datetime.now(timezone.utc).isoformat()
-    state["last_event_triage"] = datetime.now(timezone.utc).isoformat()
+    state["last_run_at"] = now_iso
+    state["last_event_triage"] = now_iso
     try:
         with open(triage_state_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
