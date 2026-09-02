@@ -15,11 +15,11 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import requests
-
 from prompt_template import (
     STRICT_RETRY,
     SYNTHESIS_SYSTEM_TEMPLATE,
@@ -31,7 +31,7 @@ from prompt_template import (
 log = logging.getLogger("ecosystem_review")
 
 SPEC_ID = "SPEC-SYSADMIN-002"
-OPENCLAW_VERSION_FALLBACK = "2026.4.10"
+OPENCLAW_VERSION_FALLBACK = "2026.8.2"
 
 ECOSYSTEM_REPOS_FULL = frozenset(
     {
@@ -87,13 +87,14 @@ RE_SECRET = re.compile(
         [
             r"OPENCLAW_GATEWAY_TOKEN\s*=\s*\S+",
             r"DOPPLER_[A-Z0-9_]+\s*=\s*\S+",
-            r"xoxb-\S+",
-            r"ghp_[A-Za-z0-9_]+",
-            r"gho_[A-Za-z0-9_]+",
+            r"xox[baprs]-[A-Za-z0-9\-]+",
+            r"gh[pousr]_[A-Za-z0-9_]+",
+            r"github_pat_[A-Za-z0-9_]+",
+            r"sk-(?:ant-|proj-)?[A-Za-z0-9_\-]+",
             r"Bearer\s+[A-Za-z0-9\-_.]+",
         ]
     ),
-    re.I,
+    re.IGNORECASE,
 )
 
 def _skill_dir() -> Path:
@@ -183,8 +184,7 @@ def resolve_gateway_base(verbose: bool) -> str:
         or "http://openclaw:18789"
     ).rstrip("/")
     # normalise …/chat/completions → gateway root
-    if base.endswith("/v1/chat/completions"):
-        base = base[: -len("/v1/chat/completions")]
+    base = base.removesuffix("/v1/chat/completions")
     if verbose:
         log.info("gateway base URL: %s", base)
     return base
@@ -208,7 +208,7 @@ def resolve_gateway_token() -> str:
 
 def _html_to_md(html: str) -> str:
     try:
-        import html2text as h2t  # noqa
+        import html2text as h2t
 
         return h2t.HTMLToText(bodywidth=120).handle(html or "")
     except Exception:
@@ -331,16 +331,12 @@ def _repo_path_allowed(repo_root: Path, slug: str, p: Path) -> bool:
     elif slug in {"openclaw-roho", "openclaw-amara", "openclaw-skills-shared"}:
         if rs.startswith(("tests/", ".git/", "skills-shared/.git")) or "__pycache__" in rs or rs.endswith(".lock"):
             ok = False
-        elif p.suffix.lower() in _SUFFIX_OK and not rs.startswith("tests/"):
-            ok = True
-        elif p.name in {"SOUL.md", "MEMORY.md", "AGENTS.md", "Dockerfile", "pyproject.toml", "requirements.txt"}:
+        elif p.suffix.lower() in _SUFFIX_OK and not rs.startswith("tests/") or p.name in {"SOUL.md", "MEMORY.md", "AGENTS.md", "Dockerfile", "pyproject.toml", "requirements.txt"}:
             ok = True
     elif slug == "openclaw-rob":
         if rs.startswith(("tests/", ".git/", "__pycache__")) or rs.endswith(".lock"):
             ok = False
-        elif rs.startswith(("src/", "skills/", "config/")) and p.suffix.lower() in _SUFFIX_OK:
-            ok = True
-        elif p.name in {"SOUL.md", "MEMORY.md", "AGENTS.md", "Dockerfile"}:
+        elif rs.startswith(("src/", "skills/", "config/")) and p.suffix.lower() in _SUFFIX_OK or p.name in {"SOUL.md", "MEMORY.md", "AGENTS.md", "Dockerfile"}:
             ok = True
 
     return ok
@@ -570,7 +566,7 @@ def _paths_from_open_roho_issues(full_repo: str) -> set[str]:
     found: set[str] = set()
     for row in rows:
         body = row.get("body") or ""
-        for m in re.finditer(r"`([^`]+\.[a-z0-9]+)`", body, flags=re.I):
+        for m in re.finditer(r"`([^`]+\.[a-z0-9]+)`", body, flags=re.IGNORECASE):
             found.add(m.group(1).strip("./"))
         for m in re.finditer(r"([A-Za-z0-9_\-.]+/(?:[^`\s]+\.(?:py|md|json|ya?ml|sh)))", body):
             candidate = m.group(1).strip("./")
