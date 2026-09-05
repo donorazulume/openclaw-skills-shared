@@ -7,6 +7,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
 from typing import Any
 
 import requests  # type: ignore
@@ -32,13 +33,25 @@ def call_deepseek_gateway(system_prompt, user_prompt, model="openclaw"):
         ],
         "temperature": 0.1,
     }
-    resp = requests.post(url, json=payload, headers=headers, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    if "choices" in data and len(data["choices"]) > 0:
-        return data["choices"][0]["message"].get("content", "")
-    else:
-        raise RuntimeError(f"Unexpected gateway completions response: {data}")
+    timeout_s = int(os.environ.get("DEEPSEEK_GATEWAY_TIMEOUT", "180"))
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout_s)
+            resp.raise_for_status()
+            data = resp.json()
+            if "choices" in data and len(data["choices"]) > 0:
+                return data["choices"][0]["message"].get("content", "")
+            else:
+                raise RuntimeError(f"Unexpected gateway completions response: {data}")
+        except Exception as e:
+            last_err = e
+            if attempt < 3:
+                time.sleep(2 ** attempt)
+            else:
+                break
+    raise RuntimeError(f"Gateway completion call failed after 3 attempts: {last_err}")
+
 
 def resolve_memory_path():
     home = os.environ.get("HOME", "/home/node")
@@ -53,6 +66,35 @@ def resolve_memory_path():
         if os.path.exists(c):
             return c
     return candidates[0]
+
+def resolve_workspace_file(filename: str) -> str:
+    import tempfile
+    home = os.environ.get("HOME", "/home/node")
+    candidates = [
+        os.environ.get("OPENCLAW_WORKSPACE_DIR"),
+        os.environ.get("OPENCLAW_STATE_DIR"),
+        os.path.join(home, ".openclaw", "workspace"),
+        os.path.join(home, "rob", ".openclaw", "workspace"),
+        "/home/node/.openclaw/workspace",
+        "/workspace",
+        tempfile.gettempdir(),
+        "/tmp",
+    ]
+    for d in candidates:
+        if not d:
+            continue
+        try:
+            p = pathlib.Path(d)
+            if p.is_dir() and os.access(p, os.W_OK):
+                return str(p / filename)
+            elif not p.exists():
+                p.mkdir(parents=True, exist_ok=True)
+                if os.access(p, os.W_OK):
+                    return str(p / filename)
+        except OSError:
+            continue
+    return os.path.join(tempfile.gettempdir(), filename)
+
 
 def resolve_bridge_path():
     home = os.environ.get("HOME", "/home/node")
@@ -228,8 +270,7 @@ def main():
         
     # 7. Post to Mattermost (#agent-rob and #coordination)
     print("Posting status to Mattermost...")
-    ws_dir = os.path.dirname(memory_path) if memory_path else "/home/node/.openclaw/workspace"
-    msg_file_path = os.path.join(ws_dir, "pre_brief_summary.txt")
+    msg_file_path = resolve_workspace_file("pre_brief_summary.txt")
     bridge_script = resolve_bridge_path()
     try:
         with open(msg_file_path, "w", encoding="utf-8") as f:
