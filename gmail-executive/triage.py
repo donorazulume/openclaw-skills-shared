@@ -223,7 +223,7 @@ def _resolve_gmail_label_id(label_name: str) -> str:
     Returns Gmail label ID (e.g. 'Label_22') or system label ID (e.g. 'INBOX').
     Auto-provisions missing labels via google_mail_create_label.
     """
-    cleaned = str(label_name or "").strip()
+    cleaned = (label_name or "").strip()
     if not cleaned:
         return cleaned
 
@@ -827,7 +827,7 @@ def event_triage(
         log.info("Processing single event-driven email: message_id=%s (principal=%s)", message_id, principal)
         msg_data = None
         backend = os.environ.get("OPENCLAW_MAIL_BACKEND", "auto").lower()
-        is_gmail_id = bool(re.match(r'^[0-9a-fA-F]{16}$', str(message_id).strip()))
+        is_gmail_id = bool(re.match(r'^[0-9a-fA-F]{16}$', message_id.strip()))
 
         if backend in ("google", "auto") or not mailbox or "gmail.com" in mailbox or is_gmail_id:
             try:
