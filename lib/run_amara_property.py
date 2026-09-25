@@ -4,6 +4,7 @@
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -30,7 +31,39 @@ def resolve_bridge_path():
             return c
     return candidates[0]
 
-def call_deepseek_gateway(system_prompt, user_prompt, model="openclaw"):
+def call_deepseek_gateway(system_prompt, user_prompt, model=None):
+    if model is None:
+        model = os.environ.get("DEEPSEEK_GATEWAY_MODEL") or os.environ.get("OPENCLAW_GATEWAY_MODEL") or "openai-compatible/deepseek-v4-flash"
+    api_key = (
+        os.environ.get("DEEPSEEK_API_KEY")
+        or os.environ.get("AMARA_DEEPSEEK_API_KEY")
+        or os.environ.get("ROB_DEEPSEEK_API_KEY")
+    )
+    if api_key:
+        direct_url = "https://api.deepseek.com/v1/chat/completions"
+        direct_headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        direct_payload = {
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.1,
+        }
+        try:
+            resp = requests.post(direct_url, json=direct_payload, headers=direct_headers, timeout=60)
+            if resp.status_code == 200:
+                data = resp.json()
+                if "choices" in data and len(data["choices"]) > 0:
+                    content = data["choices"][0]["message"].get("content", "")
+                    if content and content.strip() and content.strip() != "No response from OpenClaw.":
+                        return content
+        except Exception:
+            pass  # Fall back to gateway
+
     url = os.environ.get("DEEPSEEK_GATEWAY_URL", "http://openclaw:18789/v1/chat/completions")
     token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
     headers = {"Content-Type": "application/json"}
@@ -52,7 +85,10 @@ def call_deepseek_gateway(system_prompt, user_prompt, model="openclaw"):
             resp.raise_for_status()
             data = resp.json()
             if "choices" in data and len(data["choices"]) > 0:
-                return data["choices"][0]["message"].get("content", "")
+                content = data["choices"][0]["message"].get("content", "")
+                if content and content.strip() and content.strip() != "No response from OpenClaw.":
+                    return content
+                raise RuntimeError(f"Gateway completions returned empty or silenced content: {data}")
             else:
                 raise RuntimeError(f"Unexpected gateway completions response: {data}")
         except Exception as e:
@@ -152,9 +188,16 @@ def main():
     )
     try:
         raw_json_str = call_deepseek_gateway(json_sys, summary_md)
-        # Clean up any potential markdown wraps
-        raw_json_str = raw_json_str.strip().strip("```json").strip("```").strip()
-        property_data = json.loads(raw_json_str)
+        # Strip <think> reasoning tags if present (e.g. DeepSeek R1)
+        cleaned_str = re.sub(r"<think>.*?</think>", "", raw_json_str, flags=re.DOTALL).strip()
+        # Clean up any potential markdown wraps and extract JSON block
+        match = re.search(r"\{.*\}", cleaned_str, re.DOTALL)
+        if match:
+            property_data = json.loads(match.group(0))
+            if isinstance(property_data, dict) and "property" not in property_data:
+                property_data = {"property": property_data}
+        else:
+            raise ValueError(f"No valid JSON block found in response: {cleaned_str[:120]}")
     except Exception as exc:
         print(f"Warning: Failed to compile property JSON, generating fallback. Error: {exc}")
         property_data = {
@@ -162,7 +205,8 @@ def main():
                 "rent_status": "Email processed. Rent status unparsed.",
                 "maintenance": "Email processed. Maintenance logs unparsed.",
                 "key_dates": "Email processed. Key dates unparsed."
-            }
+            },
+            "extraction_failed": True
         }
         
     # 4. Push to LifeOS

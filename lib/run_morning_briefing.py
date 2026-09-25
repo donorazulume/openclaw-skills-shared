@@ -90,22 +90,36 @@ def resolve_script_path(rel_path):
             return c
     return candidates[0]
 
-def resolve_workspace_file(filename):
+def resolve_workspace_file(filename: str) -> str:
+    import tempfile
     home = os.environ.get("HOME", "/home/node")
-    base_dir = pathlib.Path(__file__).resolve().parents[2]
     candidates = [
-        os.path.join(home, ".openclaw", "workspace", filename),
-        os.path.join(str(base_dir), filename),
-        os.path.join("/workspace", filename),
-        os.path.join("/home/node/.openclaw/workspace", filename),
+        os.environ.get("OPENCLAW_WORKSPACE_DIR"),
+        os.environ.get("OPENCLAW_STATE_DIR"),
+        os.path.join(home, ".openclaw", "workspace"),
+        "/home/node/.openclaw/workspace",
+        "/workspace",
+        tempfile.gettempdir(),
+        "/tmp",
     ]
-    for c in candidates:
-        dir_name = os.path.dirname(c)
-        if os.path.exists(dir_name) and os.access(dir_name, os.W_OK):
-            return c
-    return os.path.join(str(base_dir), filename)
+    for d in candidates:
+        if not d:
+            continue
+        try:
+            p = pathlib.Path(d)
+            if p.is_dir() and os.access(p, os.W_OK):
+                return str(p / filename)
+            elif not p.exists():
+                p.mkdir(parents=True, exist_ok=True)
+                if os.access(p, os.W_OK):
+                    return str(p / filename)
+        except OSError:
+            continue
+    return os.path.join(tempfile.gettempdir(), filename)
 
-def call_deepseek_gateway(system_prompt, user_prompt, model="openclaw", max_retries=3):
+def call_deepseek_gateway(system_prompt, user_prompt, model=None, max_retries=3):
+    if model is None:
+        model = os.environ.get("DEEPSEEK_GATEWAY_MODEL") or os.environ.get("OPENCLAW_GATEWAY_MODEL") or "openai-compatible/deepseek-v4-flash"
     url = os.environ.get("DEEPSEEK_GATEWAY_URL", "http://openclaw:18789/v1/chat/completions")
     token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
     headers = {"Content-Type": "application/json"}
@@ -233,7 +247,7 @@ def main():
             f"--- Retrieved Multi-Agent Context ---\n{rag_output}\n"
         )
         try:
-            markdown_brief = call_deepseek_gateway(system_prompt, user_prompt, model="openclaw")
+            markdown_brief = call_deepseek_gateway(system_prompt, user_prompt)
         except Exception as llm_err:
             print(f"CRITICAL: Fallback LLM briefing compilation failed: {llm_err}")
             markdown_brief = f"# LifeOS Daily Briefing Fallback\n\nFailed to compile full briefing. Calendar events:\n{json.dumps(events_summary, indent=2)}"
@@ -317,7 +331,7 @@ def main():
                 "and a single explicit question for Don. The summary must be brief, direct, and action-oriented."
             )
             user_prompt = f"Briefing:\n{markdown_brief}"
-            dm_message = call_deepseek_gateway(system_prompt, user_prompt, model="openclaw")
+            dm_message = call_deepseek_gateway(system_prompt, user_prompt)
         except Exception as llm_err:
             print(f"ERROR: Fallback summary generation failed: {llm_err}")
             dm_message = "Actionable summary could not be compiled."

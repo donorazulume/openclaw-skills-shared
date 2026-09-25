@@ -19,7 +19,9 @@ import mcp_research
 import trading_212_client
 
 
-def call_deepseek_gateway(system_prompt, user_prompt, model="openclaw"):
+def call_deepseek_gateway(system_prompt, user_prompt, model=None):
+    if model is None:
+        model = os.environ.get("DEEPSEEK_GATEWAY_MODEL") or os.environ.get("OPENCLAW_GATEWAY_MODEL") or "openai-compatible/deepseek-v4-flash"
     url = os.environ.get("DEEPSEEK_GATEWAY_URL", "http://openclaw:18789/v1/chat/completions")
     token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
     headers = {"Content-Type": "application/json"}
@@ -199,8 +201,14 @@ def main():
     )
     try:
         raw_json_str = call_deepseek_gateway(json_sys, json.dumps(context, indent=2))
-        raw_json_str = raw_json_str.strip().strip("```json").strip("```").strip()
-        portfolio_data = json.loads(raw_json_str)
+        # Strip <think> reasoning tags if present (e.g. DeepSeek R1)
+        cleaned_str = re.sub(r"<think>.*?</think>", "", raw_json_str, flags=re.DOTALL).strip()
+        # Clean up any potential markdown wraps and extract JSON block
+        match = re.search(r"\{.*\}", cleaned_str, re.DOTALL)
+        if match:
+            portfolio_data = json.loads(match.group(0))
+        else:
+            raise ValueError(f"No valid JSON block found in response: {cleaned_str[:120]}")
     except Exception as exc:
         print(f"Warning: Failed to compile portfolio JSON, generating fallback. Error: {exc}")
         portfolio_data = {
@@ -213,7 +221,8 @@ def main():
                 "tiingo_market_research": "Research checks processed."
             },
             "unreconciled_transactions": unreconciled_count,
-            "filings_upcoming_deadlines": filings_info
+            "filings_upcoming_deadlines": filings_info,
+            "extraction_failed": True
         }
         
     # 4.5 Mandatory Research Protocol Gate (Issue #556)

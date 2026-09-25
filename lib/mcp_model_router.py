@@ -17,10 +17,10 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_REGISTRY_PATH = REPO_ROOT / "config" / "model-registry.json"
@@ -38,6 +38,11 @@ class DispatchDecision:
     secret_env_var: str
     max_cost_per_call_usd: float
     timestamp_iso: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class CompletionTruncatedError(RuntimeError):
+    """Raised when an LLM completion response was truncated by token limit (finish_reason='length')."""
+    pass
 
 
 class CircuitBreaker:
@@ -170,6 +175,18 @@ class ModelRouter:
             agent_var = per_agent[self.agent_name]
             if agent_var in os.environ:
                 return agent_var
+            # Support bidirectional suffix <-> prefix conventions (Issue #835)
+            # e.g. DEEPSEEK_API_KEY_ROHO <-> ROHO_DEEPSEEK_API_KEY
+            alt_var = None
+            agent_upper = self.agent_name.upper()
+            if agent_var.endswith(f"_{agent_upper}"):
+                base = agent_var[:-len(f"_{agent_upper}")]
+                alt_var = f"{agent_upper}_{base}"
+            elif agent_var.startswith(f"{agent_upper}_"):
+                base = agent_var[len(f"{agent_upper}_"):]
+                alt_var = f"{base}_{agent_upper}"
+            if alt_var and alt_var in os.environ:
+                return alt_var
             if provider_info.get("secretEnvVar") in os.environ:
                 return provider_info.get("secretEnvVar", "API_KEY")
             return agent_var
@@ -181,6 +198,29 @@ class ModelRouter:
             return p, m
         return "openai-compatible", full_spec
 
+    def _is_provider_ready(self, provider_id: str, provider_info: dict[str, Any]) -> bool:
+        """Check if provider is configured and has required secrets available in environment."""
+        status = provider_info.get("status", "ready")
+        if status in ("retired", "disabled"):
+            return False
+
+        secret_key = self._resolve_secret_key(provider_id, provider_info)
+        if os.environ.get(secret_key):
+            return True
+
+        if status == "unconfigured":
+            return False
+
+        gen_key = provider_info.get("secretEnvVar")
+        if gen_key and os.environ.get(gen_key):
+            return True
+
+        # Require explicit secret presence for remote API providers without local fallbacks
+        if provider_id in ("moonshot",):
+            return False
+
+        return True
+
     def resolve_route(
         self,
         task_class: str = "fastchat",
@@ -190,8 +230,12 @@ class ModelRouter:
         routes = self.registry_data.get("routes", {})
         route_info = routes.get(task_class, routes.get("fastchat", {}))
 
-        # Agent ownership validation (SPEC-AGENT-MODELROUTE / Issue #620)
+        # Agent ownership validation (SPEC-AGENT-MODELROUTE / Issue #620 / Issue #792)
         allowed_agents = route_info.get("allowedAgents")
+        if allowed_agents is None and task_class in ("financial", "statutory"):
+            # Enforce fail-closed security invariant: financial & statutory strictly reserved for Rob
+            allowed_agents = ["rob"]
+
         if allowed_agents and not override_model:
             allowed_set = {str(a).lower() for a in allowed_agents}
             caller_agent = self.agent_name.lower()
@@ -287,7 +331,7 @@ class ModelRouter:
             p, m = self._spec_to_provider_model(cand_spec)
             p_info = providers_data.get(p, {})
 
-            if p_info.get("status") == "retired":
+            if not self._is_provider_ready(p, p_info):
                 continue
 
             if self.circuit_breaker.is_available(p):
@@ -296,7 +340,7 @@ class ModelRouter:
                 break
 
         if not selected_spec:
-            # Fallback to primary if all candidates are degraded
+            # Fallback to default safe model if all candidates are degraded or missing credentials
             selected_spec = route_info.get("primary", "openai-compatible/deepseek-v4-flash")
             decision_type = "fallback"
 
@@ -389,6 +433,10 @@ class ModelRouter:
                 return result
             except Exception as exc:
                 last_exc = exc
+                # Deterministic HTTP failures (400, 401, 403) should not trigger retry delays
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                if status_code in (400, 401, 403):
+                    break
                 if attempt < max_retries:
                     time.sleep(backoff_sec * attempt)
 
@@ -413,6 +461,18 @@ class ModelRouter:
             # Silent fallback if open_brain service is offline or un-imported
             pass
 
+    def _resolve_default_gateway_url(self) -> str:
+        """Resolve agent-aware default gateway URL (Roho :18789, Amara :18790, Rob :18791)."""
+        override = os.environ.get("DEEPSEEK_GATEWAY_URL")
+        if override:
+            return override
+        norm_agent = (self.agent_name or "").lower().strip()
+        if norm_agent == "amara":
+            return "http://openclaw-amara:18790/v1/chat/completions"
+        elif norm_agent == "rob":
+            return "http://openclaw-rob:18791/v1/chat/completions"
+        return "http://openclaw:18789/v1/chat/completions"
+
     def complete(
         self,
         messages: list[dict[str, str]],
@@ -425,36 +485,110 @@ class ModelRouter:
         decision = self.resolve_route(task_class=task_class, override_model=override_model)
         start_time = time.time()
 
-        gateway_url = os.environ.get("DEEPSEEK_GATEWAY_URL", "http://openclaw:18789/v1/chat/completions")
-        token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
-        headers = {"Content-Type": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        provider_info = self.registry_data.get("providers", {}).get(decision.provider, {})
+        base_url = provider_info.get("baseUrl")
+        is_moonshot = (decision.provider == "moonshot") or ("kimi" in decision.model.lower())
 
-        payload = {
+        # Moonshot API strictly requires temperature=1.0 or omitted for reasoning models (Issue #793)
+        effective_temp = None if is_moonshot else temperature
+
+        payload: dict[str, Any] = {
             "model": decision.full_model_spec,
             "messages": messages,
-            "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if effective_temp is not None:
+            payload["temperature"] = effective_temp
 
         import requests  # type: ignore
 
-        def _do_post():
-            resp = requests.post(gateway_url, json=payload, headers=headers, timeout=60)
+        # Resolve direct credentials if available
+        api_key = None
+        try:
+            from token_resolver import resolve_secret
+            api_key = resolve_secret(decision.secret_env_var)
+        except Exception:
+            api_key = os.environ.get(decision.secret_env_var)
+
+        def _do_direct():
+            if not base_url:
+                raise RuntimeError(f"No direct baseUrl configured for provider {decision.provider}")
+            if not api_key:
+                raise RuntimeError(f"Missing API key {decision.secret_env_var} for direct dispatch")
+
+            direct_url = f"{base_url.rstrip('/')}/chat/completions"
+            direct_headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            }
+            direct_payload: dict[str, Any] = {
+                "model": decision.model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+            }
+            if effective_temp is not None:
+                direct_payload["temperature"] = effective_temp
+
+            resp = requests.post(direct_url, json=direct_payload, headers=direct_headers, timeout=60)
+            resp.raise_for_status()
+            return resp
+
+        def _do_gateway():
+            gateway_url = self._resolve_default_gateway_url()
+            token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+            gw_headers = {"Content-Type": "application/json"}
+            if token:
+                gw_headers["Authorization"] = f"Bearer {token}"
+            resp = requests.post(gateway_url, json=payload, headers=gw_headers, timeout=60)
             resp.raise_for_status()
             return resp
 
         try:
-            resp = self.dispatch_with_retry(_do_post, max_retries=3, provider_hint=decision.provider)
+            # Issue #793: When a direct baseUrl and valid credentials are configured,
+            # dispatch directly to avoid internal gateway 401 Unauthorized retry loops.
+            # Otherwise, or if explicit DEEPSEEK_GATEWAY_URL is provided, route via gateway.
+            if base_url and api_key and not os.environ.get("DEEPSEEK_GATEWAY_URL"):
+                resp = self.dispatch_with_retry(
+                    _do_direct, max_retries=2, provider_hint=f"{decision.provider}-direct"
+                )
+            else:
+                try:
+                    resp = self.dispatch_with_retry(
+                        _do_gateway, max_retries=2, provider_hint=decision.provider
+                    )
+                except Exception as gw_err:
+                    if base_url and api_key:
+                        resp = self.dispatch_with_retry(
+                            _do_direct, max_retries=2, provider_hint=f"{decision.provider}-direct"
+                        )
+                    else:
+                        raise gw_err
+
             data = resp.json()
             latency_ms = int((time.time() - start_time) * 1000)
             usage = data.get("usage", {})
             tokens_in = usage.get("prompt_tokens", 0)
             tokens_out = usage.get("completion_tokens", 0)
-            self.record_dispatch_outcome(decision, http_status=200, latency_ms=latency_ms, tokens_in=tokens_in, tokens_out=tokens_out)
+            self.record_dispatch_outcome(
+                decision, http_status=200, latency_ms=latency_ms, tokens_in=tokens_in, tokens_out=tokens_out
+            )
+
             if "choices" in data and len(data["choices"]) > 0:
-                return data["choices"][0]["message"].get("content", "")
+                first_choice = data["choices"][0]
+                msg = first_choice.get("message", {})
+                content = msg.get("content", "")
+                reasoning_content = msg.get("reasoning_content", "")
+                finish_reason = first_choice.get("finish_reason", "")
+
+                # Issue #793: Handle truncation and reasoning-only models
+                if not content and finish_reason == "length":
+                    raise CompletionTruncatedError(
+                        f"Model {decision.full_model_spec} truncated output due to max_tokens limit "
+                        f"(finish_reason='length'). Max tokens was {max_tokens}."
+                    )
+                if not content and reasoning_content:
+                    return reasoning_content
+                return content or ""
             return ""
         except Exception as exc:
             latency_ms = int((time.time() - start_time) * 1000)
@@ -478,4 +612,3 @@ class ModelRouter:
             "budget_kill_switch": self.budget_kill_switch,
             "providers": status,
         }
-
