@@ -19,6 +19,7 @@ Environment variables:
 from __future__ import annotations
 
 import argparse
+import builtins
 import json
 import logging
 import mimetypes
@@ -31,7 +32,26 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
 
-import requests
+import requests  # type: ignore
+
+_orig_print = builtins.print
+_has_error = False
+
+def print(*args, **kwargs):
+    global _has_error
+    is_error = False
+    if args:
+        val = args[0]
+        if isinstance(val, dict) and ("error" in val or val.get("status") == "unhealthy") or isinstance(val, str) and ('"error":' in val or '"status": "unhealthy"' in val):
+            is_error = True
+            
+    if is_error:
+        _has_error = True
+        kwargs["file"] = sys.stderr
+        
+    _orig_print(*args, **kwargs)
+
+builtins.print = print
 
 # Resolve lib path dynamically for imports
 _SELF_DIR = Path(__file__).resolve().parent
@@ -50,6 +70,13 @@ try:
 except ImportError:
     mcp_comms_client = None
 
+format_agent_response: Any = None
+try:
+    import mattermost_formatter  # type: ignore
+    format_agent_response = getattr(mattermost_formatter, "format_agent_response", None)
+except ImportError:
+    pass
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("mattermost-bridge")
 
@@ -66,6 +93,29 @@ def _escape_dollars(message: str) -> str:
     for i in range(0, len(parts), 2):
         parts[i] = re.sub(r'(?<!\\)\$', r'\\$', parts[i])
     return "".join(parts)
+
+
+def _is_raw_cli_json_dump(content: str) -> bool:
+    """Check if content is an unformatted raw CLI JSON output dump (REQ-CRON-002 / Issue #708)."""
+    if not content:
+        return False
+    stripped = content.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            data = json.loads(stripped)
+            if isinstance(data, dict):
+                if "summary" in data and ("emails" in data or "total_processed" in data.get("summary", {})):
+                    return True
+                if "emails" in data and isinstance(data["emails"], list):
+                    return True
+                if "status" in data and "total_processed" in data:
+                    return True
+        except Exception:
+            pass
+    elif "[BEGIN UNTRUSTED CONTENT]" in stripped and "[END UNTRUSTED CONTENT]" in stripped:
+        return True
+    return False
+
 
 MM_URL = os.environ.get("MATTERMOST_URL", "http://mattermost:8065")
 MM_TOKEN = os.environ.get("MATTERMOST_BOT_TOKEN", "")
@@ -96,22 +146,27 @@ def _headers() -> dict[str, str]:
 def _api(
     method: str,
     path: str,
-    payload: Optional[Any] = None,
-) -> dict[str, Any]:
+    payload: Any | None = None,
+) -> Any:
     """Call Mattermost REST API via Comms MCP request proxy, or direct if fallback is needed."""
-    if mcp_comms_client:
+    if mcp_comms_client and hasattr(mcp_comms_client, "request"):
         try:
-            # Clean path to make sure it doesn't duplicate /api/v4 prefix
             clean_path = path
-            if clean_path.startswith("/api/v4"):
-                clean_path = clean_path[7:]
+            if not clean_path.startswith("/api/v4"):
+                clean_path = f"/api/v4{clean_path}"
             # Comms MCP request expects method, path, payload
-            return mcp_comms_client.request(method, clean_path, payload)
+            res = mcp_comms_client.request(method, clean_path, payload)
+            if isinstance(res, dict) and res.get("error") in ("MCP_COMM_ERROR", "CommsMCPError"):
+                log.warning("MCP_COMM_ERROR returned by Comms MCP proxy; falling back to direct HTTP: %s", res)
+            elif isinstance(res, dict) and "error" in res and res.get("error") != "HTTP 403":
+                log.warning("Comms MCP proxy returned error (%s); falling back to direct HTTP", res.get("error"))
+            else:
+                return res
         except Exception as exc:
-            log.error("MCP_COMM_ERROR: Comms MCP proxy call failed: %s", exc)
-            return {"error": "MCP_COMM_ERROR", "detail": str(exc)}
+            log.warning("MCP_COMM_ERROR: Comms MCP proxy call failed (%s); falling back to direct HTTP", exc)
 
-    # Fallback to direct requests if mcp_comms_client is not available
+    # Fallback to direct requests if mcp_comms_client is not available or proxy failed
+
     url = f"{MM_URL}/api/v4{path}"
     try:
         resp = requests.request(
@@ -147,61 +202,123 @@ _channel_cache: dict[str, str] = {}
 _CHANNEL_ID_PATTERN = re.compile(r"^[a-z0-9]{26}$")
 
 
-def _resolve_team_id_pref() -> Optional[str]:
-    """Prefer MATTERMOST_TEAM_ID, else resolve MATTERMOST_TEAM_NAME via API."""
+def _resolve_team_id(team_arg: str | None = None) -> str | None:
+    """Resolve a team ID or name to team ID, preferring the CLI arg,
+    then MATTERMOST_TEAM_ID, then MATTERMOST_TEAM_NAME.
+    If none are configured, defaults to the only team the bot belongs to if count is 1.
+    """
+    if team_arg:
+        team_arg_clean = team_arg.lstrip("#").strip()
+        if _CHANNEL_ID_PATTERN.match(team_arg_clean):
+            return team_arg_clean
+        team = _api("GET", f"/teams/name/{team_arg_clean}")
+        if isinstance(team, dict) and team.get("id"):
+            return team["id"]
     if MM_TEAM_ID:
         return MM_TEAM_ID
     if MM_TEAM_NAME:
         team = _api("GET", f"/teams/name/{MM_TEAM_NAME}")
         if isinstance(team, dict) and team.get("id"):
             return team["id"]
+
+    # Default to the only team if the bot belongs to exactly one
+    me = _api("GET", "/users/me")
+    if isinstance(me, dict) and me.get("id"):
+        teams = _api("GET", f"/users/{me['id']}/teams")
+        if isinstance(teams, list) and len(teams) == 1 and isinstance(teams[0], dict) and teams[0].get("id"):
+            return teams[0]["id"]
     return None
 
 
-def _resolve_channel(name: str) -> Optional[str]:
+def _resolve_channel(name: str, team_arg: str | None = None) -> str | None:
     """Resolve a channel name or channel ID to its ID. Caches results.
 
-    When MATTERMOST_TEAM_ID or MATTERMOST_TEAM_NAME is set, only that team is used
-    (avoids posting to a channel name that exists in another team — Issue #195).
+    When team_arg, MATTERMOST_TEAM_ID or MATTERMOST_TEAM_NAME is set,
+    we prefer to look in that specific team first (avoids posting to a channel name
+    that exists in another team — Issue #195).
+    Falls back to searching all teams if not found in the preferred team.
+    Supports team/channel format explicitly.
     """
+    if not name:
+        return None
+    raw_name = name
+    name = name.lstrip("#").strip()
+    if not name:
+        return None
+
     if name in _channel_cache:
         return _channel_cache[name]
+    if raw_name in _channel_cache:
+        return _channel_cache[raw_name]
 
     if _CHANNEL_ID_PATTERN.match(name):
         ch = _api("GET", f"/channels/{name}")
         if isinstance(ch, dict) and ch.get("id") and not ch.get("error"):
             _channel_cache[name] = ch["id"]
+            _channel_cache[raw_name] = ch["id"]
             return ch["id"]
+        # Fallback: if it matches the 26-char pattern, return it directly to allow the post
+        # call to proceed (which can attempt auto-join on 403)
+        log.warning("Could not verify channel ID %r via API, returning as-is", name)
+        return name
+
+    # Handle team/channel format
+    if "/" in name:
+        parts = name.split("/", 1)
+        team_part = parts[0].strip().lstrip("#")
+        channel_part = parts[1].strip().lstrip("#")
+        team_id = None
+        if _CHANNEL_ID_PATTERN.match(team_part):
+            team_id = team_part
+        else:
+            team = _api("GET", f"/teams/name/{team_part}")
+            if isinstance(team, dict) and team.get("id"):
+                team_id = team["id"]
+        
+        if team_id:
+            if _CHANNEL_ID_PATTERN.match(channel_part):
+                _channel_cache[name] = channel_part
+                _channel_cache[raw_name] = channel_part
+                return channel_part
+            ch = _api("GET", f"/teams/{team_id}/channels/name/{channel_part}")
+            if isinstance(ch, dict) and ch.get("id"):
+                _channel_cache[name] = ch["id"]
+                _channel_cache[raw_name] = ch["id"]
+                return ch["id"]
+        log.warning("Could not resolve team/channel handle %r", name)
         return None
 
-    pref_tid = _resolve_team_id_pref()
+    pref_tid = _resolve_team_id(team_arg)
     if pref_tid:
         ch = _api("GET", f"/teams/{pref_tid}/channels/name/{name}")
         if isinstance(ch, dict) and ch.get("id"):
             _channel_cache[name] = ch["id"]
+            _channel_cache[raw_name] = ch["id"]
             return ch["id"]
-        return None
+        log.warning("Channel %r not found in preferred team %r. Falling back to all teams.", name, pref_tid)
 
     me = _api("GET", "/users/me")
-    if "error" in me:
+    if not isinstance(me, dict) or me.get("error") or not me.get("id"):
         return None
 
     teams = _api("GET", f"/users/{me['id']}/teams")
-    if isinstance(teams, dict) and "error" in teams:
+    if not isinstance(teams, list):
         return None
 
-    team_list = teams if isinstance(teams, list) else []
     matches: list[tuple[str, str, str]] = []
-    for team in team_list:
+    for team in teams:
+        if not isinstance(team, dict) or not team.get("id"):
+            continue
         ch = _api("GET", f"/teams/{team['id']}/channels/name/{name}")
         if isinstance(ch, dict) and ch.get("id"):
-            label = team.get("display_name") or team.get("name") or team["id"]
+            label = team.get("display_name") or team.get("name") or team.get("id", "")
             matches.append((label, team["id"], ch["id"]))
 
     if not matches:
         return None
     if len(matches) == 1:
         _channel_cache[name] = matches[0][2]
+        _channel_cache[raw_name] = matches[0][2]
         return matches[0][2]
 
     matches.sort(key=lambda m: m[0].lower())
@@ -213,14 +330,15 @@ def _resolve_channel(name: str) -> Optional[str]:
         ", ".join(m[0] for m in matches[:5]),
     )
     _channel_cache[name] = matches[0][2]
+    _channel_cache[raw_name] = matches[0][2]
     return matches[0][2]
 
 
 def _join_self_to_channel(channel_id: str) -> dict[str, Any]:
     """Add the authenticated bot user to a channel (fixes many 403 post errors)."""
     me = _api("GET", "/users/me")
-    if "error" in me:
-        return me
+    if not isinstance(me, dict) or me.get("error") or not me.get("id"):
+        return me if isinstance(me, dict) else {"error": "Invalid user response"}
     bot_id = me["id"]
     return _api("POST", f"/channels/{channel_id}/members", {"user_id": bot_id})
 
@@ -238,7 +356,7 @@ def _upload_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {MM_TOKEN}"}
 
 
-def _validate_file_path(file_path: str) -> Optional[dict[str, Any]]:
+def _validate_file_path(file_path: str) -> dict[str, Any] | None:
     """Validate a file path for upload. Returns error dict or None if valid.
 
     Checks: exists, not empty, under size limit, no path traversal (NFR-MMATT-007).
@@ -302,24 +420,26 @@ def _upload_file(channel_id: str, file_path: str) -> dict[str, Any]:
                 "file_bytes_b64": file_bytes_b64,
             }
             res = mcp_comms_client.call("api/comms/upload", body)
-            if "error" in res:
-                return res
-            file_infos = res.get("file_infos", [])
-            if not file_infos:
-                return {"error": "NO_FILE_INFO", "detail": "Upload succeeded but no file_infos returned", "file": file_path}
-            fi = file_infos[0]
-            log.info("Uploaded %s → file_id=%s", filename, fi["id"])
-            return {
-                "file_id": fi["id"],
-                "filename": fi.get("name", filename),
-                "size": fi.get("size", size),
-                "mime_type": fi.get("mime_type", mime_type),
-            }
+            if isinstance(res, dict) and "error" in res:
+                log.warning("MCP_COMM_ERROR in Comms MCP upload proxy (%s); falling back to direct HTTP upload", res)
+            else:
+                file_infos = res.get("file_infos", [])
+                if not file_infos:
+                    log.warning("Comms MCP upload returned no file_infos; falling back to direct HTTP upload: %s", res)
+                else:
+                    fi = file_infos[0]
+                    log.info("Uploaded %s → file_id=%s", filename, fi["id"])
+                    return {
+                        "file_id": fi["id"],
+                        "filename": fi.get("name", filename),
+                        "size": fi.get("size", size),
+                        "mime_type": fi.get("mime_type", mime_type),
+                    }
         except Exception as exc:
-            log.error("MCP_COMM_ERROR: Comms MCP file upload failed: %s", exc)
-            return {"error": "MCP_COMM_ERROR", "detail": str(exc), "file": file_path}
+            log.warning("MCP_COMM_ERROR: Comms MCP file upload failed (%s); falling back to direct HTTP upload", exc)
 
-    # Fallback path if mcp_comms_client is not available
+    # Fallback path if mcp_comms_client is not available or proxy upload failed
+
     url = f"{MM_URL}/api/v4/files?channel_id={channel_id}"
     try:
         with open(resolved, "rb") as f:
@@ -409,7 +529,7 @@ def _handle_file_uploads(
     channel_id: str,
     file_paths: list[str],
     auto_join: bool,
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Upload files with auto-join retry on 403 (REQ-MMATT-012).
 
     Returns upload result dict, or None if no files to upload.
@@ -528,19 +648,39 @@ def cmd_react(args: argparse.Namespace) -> None:
 
 def cmd_post(args: argparse.Namespace) -> None:
     """Post a message to a channel (REQ-MMATT-003: with optional file attachments)."""
-    channel_id = _resolve_channel(args.channel)
+    channel_id = _resolve_channel(args.channel, args.team)
     if not channel_id:
         print(json.dumps({"error": f"Channel '{args.channel}' not found"}))
+        sys.exit(1)
+
+    if not getattr(args, "allow_json", False) and _is_raw_cli_json_dump(args.message):
+        log.error("Rejected post: Raw CLI JSON dump detected (violates REQ-CRON-002 / Issue #708).")
+        print(json.dumps({
+            "error": "RAW_JSON_DUMP_BLOCKED",
+            "detail": "Posting raw CLI JSON stdout to Mattermost channels is blocked (Issue #708). Synthesize a Markdown executive summary or pass --allow-json.",
+        }))
         sys.exit(1)
 
     # Upload files if provided
     upload_result = _handle_file_uploads(channel_id, args.file_path, args.auto_join)
     file_ids = upload_result["file_ids"] if upload_result and "file_ids" in upload_result else []
 
-    escaped_message = _escape_dollars(args.message)
+    fmt_res = None
+    if format_agent_response is not None:
+        fmt_res = format_agent_response({
+            "agent_id": AGENT_NAME,
+            "channel_id": channel_id,
+            "channel_type": "O",
+            "target_agent_id": getattr(args, "target_agent", None),
+            "raw_content": args.message,
+        })
+        formatted_message = fmt_res.get("message", args.message)
+    else:
+        formatted_message = _escape_dollars(args.message)
+
     payload: dict[str, Any] = {
         "channel_id": channel_id,
-        "message": escaped_message,
+        "message": formatted_message,
     }
     if file_ids:
         payload["file_ids"] = file_ids
@@ -560,6 +700,20 @@ def cmd_post(args: argparse.Namespace) -> None:
         else:
             result["join_attempt"] = join_res
 
+    # Issue #818: Post overflow continuation replies if present
+    if isinstance(result, dict) and "id" in result and fmt_res and fmt_res.get("overflow_posts"):
+        overflow_root_id = result.get("root_id") or result["id"]
+        overflow_results = []
+        for ov_item in fmt_res["overflow_posts"]:
+            ov_payload = {
+                "channel_id": ov_item.get("channel_id", channel_id),
+                "root_id": overflow_root_id,
+                "message": ov_item.get("message", ""),
+            }
+            ov_res = _api("POST", "/posts", ov_payload)
+            overflow_results.append(ov_res)
+        result["overflow_posts"] = overflow_results
+
     # Merge upload metadata into output
     if upload_result and "files" in upload_result:
         result["files_uploaded"] = upload_result["files"]
@@ -572,14 +726,57 @@ def cmd_post(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
+def _join_token_to_channel(token: str, channel_id: str) -> dict[str, Any]:
+    url = f"{MM_URL}/api/v4/users/me"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return {"error": f"HTTP {r.status_code}"}
+        bot_id = r.json().get("id")
+        m_url = f"{MM_URL}/api/v4/channels/{channel_id}/members"
+        mr = requests.post(m_url, json={"user_id": bot_id}, headers=headers, timeout=10)
+        if mr.status_code in (200, 201):
+            return {"status": "joined", "user_id": bot_id}
+        elif mr.status_code == 400 and "already" in mr.text.lower():
+            return {"status": "already_member", "user_id": bot_id}
+        else:
+            return {"error": f"HTTP {mr.status_code}: {mr.text[:150]}"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def cmd_join(args: argparse.Namespace) -> None:
     """Explicitly add the bot to a channel (public or private if permitted)."""
-    channel_id = _resolve_channel(args.channel)
+    channel_id = _resolve_channel(args.channel, args.team)
     if not channel_id:
         print(json.dumps({"error": f"Channel '{args.channel}' not found"}))
         sys.exit(1)
     result = _join_self_to_channel(channel_id)
     print(json.dumps(result, indent=2, default=str))
+
+
+def cmd_join_all(args: argparse.Namespace) -> None:
+    """Explicitly add ALL principal agent bot accounts (Roho, Rob, Amara) to a channel."""
+    channel_id = _resolve_channel(args.channel, args.team)
+    if not channel_id:
+        print(json.dumps({"error": f"Channel '{args.channel}' not found"}))
+        sys.exit(1)
+
+    agent_tokens = {
+        "ROHO": os.environ.get("MATTERMOST_BOT_TOKEN_ROHO") or os.environ.get("MCP_TOKEN_COMMS_ROHO") or MM_TOKEN,
+        "ROB": os.environ.get("MATTERMOST_BOT_TOKEN_ROB") or os.environ.get("MCP_TOKEN_COMMS_ROB"),
+        "AMARA": os.environ.get("MATTERMOST_BOT_TOKEN_AMARA") or os.environ.get("MCP_TOKEN_COMMS_AMARA"),
+    }
+
+    results = {}
+    for agent_id, tok in agent_tokens.items():
+        if tok:
+            results[agent_id] = _join_token_to_channel(tok, channel_id)
+        else:
+            results[agent_id] = {"status": "skipped", "reason": "no_token_env"}
+
+    print(json.dumps({"ok": True, "channel": args.channel, "channel_id": channel_id, "joins": results}, indent=2, default=str))
 
 
 def cmd_resolve_user(args: argparse.Namespace) -> None:
@@ -646,10 +843,22 @@ def cmd_dm(args: argparse.Namespace) -> None:
     upload_result = _handle_file_uploads(channel_id, args.file_path, args.auto_join)
     file_ids = upload_result["file_ids"] if upload_result and "file_ids" in upload_result else []
 
-    escaped_message = _escape_dollars(args.message)
+    fmt_res = None
+    if format_agent_response is not None:
+        fmt_res = format_agent_response({
+            "agent_id": AGENT_NAME,
+            "channel_id": channel_id,
+            "channel_type": "D",
+            "target_agent_id": username,
+            "raw_content": args.message,
+        })
+        formatted_message = fmt_res.get("message", args.message)
+    else:
+        formatted_message = _escape_dollars(args.message)
+
     payload: dict[str, Any] = {
         "channel_id": channel_id,
-        "message": escaped_message,
+        "message": formatted_message,
     }
     if file_ids:
         payload["file_ids"] = file_ids
@@ -664,7 +873,23 @@ def cmd_dm(args: argparse.Namespace) -> None:
                 payload["file_ids"] = file_ids if file_ids else []
             result = _api("POST", "/posts", payload)
 
+    # Issue #818: Post overflow continuation replies if present
+    if isinstance(result, dict) and "id" in result and fmt_res and fmt_res.get("overflow_posts"):
+        overflow_root_id = result.get("root_id") or result["id"]
+        overflow_results = []
+        for ov_item in fmt_res["overflow_posts"]:
+            ov_payload = {
+                "channel_id": ov_item.get("channel_id", channel_id),
+                "root_id": overflow_root_id,
+                "message": ov_item.get("message", ""),
+            }
+            ov_res = _api("POST", "/posts", ov_payload)
+            overflow_results.append(ov_res)
+        result["overflow_posts"] = overflow_results
+
     out: dict[str, Any] = {"channel_id": channel_id, "target_user_id": target_id, "post": result}
+    if "overflow_posts" in result:
+        out["overflow_posts"] = result["overflow_posts"]
     if upload_result and "files" in upload_result:
         out["files_uploaded"] = upload_result["files"]
         if upload_result.get("errors"):
@@ -683,7 +908,7 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
     if not args.message:
         print(json.dumps({"error": "--message is required for dispatch"}))
         sys.exit(1)
-    channel_id = _resolve_channel(args.channel)
+    channel_id = _resolve_channel(args.channel, args.team)
     if not channel_id:
         print(json.dumps({"error": f"Channel '{args.channel}' not found"}))
         sys.exit(1)
@@ -715,7 +940,16 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
     post_payload: dict[str, Any] = {
         "channel_id": channel_id,
         "message": message,
-        "props": {"dispatch": dispatch_payload},
+        "props": {
+            "dispatch": dispatch_payload,
+            "openclaw_provenance": {
+                "source_agent": AGENT_NAME,
+                "target_agent": args.recipient,
+                "task_id": task_id,
+                "priority": args.priority,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        },
     }
     if file_ids:
         post_payload["file_ids"] = file_ids
@@ -735,7 +969,7 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
 
 def cmd_read(args: argparse.Namespace) -> None:
     """Read recent messages from a channel."""
-    channel_id = _resolve_channel(args.channel)
+    channel_id = _resolve_channel(args.channel, args.team)
     if not channel_id:
         print(json.dumps({"error": f"Channel '{args.channel}' not found"}))
         sys.exit(1)
@@ -784,16 +1018,43 @@ def cmd_thread(args: argparse.Namespace) -> None:
     upload_result = _handle_file_uploads(channel_id, args.file_path, args.auto_join)
     file_ids = upload_result["file_ids"] if upload_result and "file_ids" in upload_result else []
 
-    escaped_message = _escape_dollars(args.message)
+    fmt_res = None
+    if format_agent_response is not None:
+        fmt_res = format_agent_response({
+            "agent_id": AGENT_NAME,
+            "channel_id": channel_id,
+            "channel_type": "O",
+            "root_id": root_id,
+            "target_agent_id": getattr(args, "target_agent", None),
+            "raw_content": args.message,
+        })
+        formatted_message = fmt_res.get("message", args.message)
+    else:
+        formatted_message = _escape_dollars(args.message)
+
     payload: dict[str, Any] = {
         "channel_id": channel_id,
         "root_id": root_id,
-        "message": escaped_message,
+        "message": formatted_message,
     }
     if file_ids:
         payload["file_ids"] = file_ids
 
     result = _api("POST", "/posts", payload)
+
+    # Issue #818: Post overflow continuation replies if present
+    if isinstance(result, dict) and "id" in result and fmt_res and fmt_res.get("overflow_posts"):
+        overflow_root_id = result.get("root_id") or root_id or result["id"]
+        overflow_results = []
+        for ov_item in fmt_res["overflow_posts"]:
+            ov_payload = {
+                "channel_id": ov_item.get("channel_id", channel_id),
+                "root_id": overflow_root_id,
+                "message": ov_item.get("message", ""),
+            }
+            ov_res = _api("POST", "/posts", ov_payload)
+            overflow_results.append(ov_res)
+        result["overflow_posts"] = overflow_results
 
     if upload_result and "files" in upload_result:
         result["files_uploaded"] = upload_result["files"]
@@ -830,7 +1091,7 @@ def cmd_upload(args: argparse.Namespace) -> None:
         print(json.dumps({"error": "--file-path is required for upload"}))
         sys.exit(1)
 
-    channel_id = _resolve_channel(args.channel)
+    channel_id = _resolve_channel(args.channel, args.team)
     if not channel_id:
         print(json.dumps({"error": f"Channel '{args.channel}' not found"}))
         sys.exit(1)
@@ -862,16 +1123,19 @@ def cmd_channels(args: argparse.Namespace) -> None:
 
     all_channels = []
     for team in (teams if isinstance(teams, list) else []):
+        if not isinstance(team, dict) or not team.get("id"):
+            continue
         channels = _api("GET", f"/users/{me['id']}/teams/{team['id']}/channels")
         if isinstance(channels, list):
             for ch in channels:
-                all_channels.append({
-                    "name": ch.get("name"),
-                    "display_name": ch.get("display_name"),
-                    "id": ch.get("id"),
-                    "team": team.get("name"),
-                    "type": ch.get("type"),
-                })
+                if isinstance(ch, dict):
+                    all_channels.append({
+                        "name": ch.get("name"),
+                        "display_name": ch.get("display_name"),
+                        "id": ch.get("id"),
+                        "team": team.get("name"),
+                        "type": ch.get("type"),
+                    })
 
     print(json.dumps({"channels": all_channels}, indent=2))
 
@@ -894,12 +1158,14 @@ def main() -> None:
     parser.add_argument("--action", required=True,
                         choices=[
                             "post", "read", "thread", "dispatch", "channels", "health",
-                            "join", "resolve-user", "dm", "react", "upload", "edit",
+                            "join", "join-all", "resolve-user", "dm", "react", "upload", "edit",
                         ])
     parser.add_argument("--channel", default="coordination")
+    parser.add_argument("--team", default="", help="Mattermost team name or ID override")
     parser.add_argument("--message", default="")
     parser.add_argument("--post-id", default="")
     parser.add_argument("--recipient", default="")
+    parser.add_argument("--target-agent", default="", help="Target agent handle for A2A mention injection (MSG-001)")
     parser.add_argument("--task-id", default="")
     parser.add_argument("--priority", default="normal", choices=["low", "normal", "high", "critical"])
     parser.add_argument("--limit", type=int, default=20)
@@ -933,6 +1199,12 @@ def main() -> None:
         help="One or more file paths to attach to the post (max 5). "
              "Files are uploaded via Mattermost Files API before posting.",
     )
+    parser.add_argument(
+        "--allow-json",
+        action="store_true",
+        default=False,
+        help="Allow posting raw CLI JSON dumps (e.g. for structured debug posts)",
+    )
 
     args = parser.parse_args()
 
@@ -952,13 +1224,21 @@ def main() -> None:
         "channels": cmd_channels,
         "health": cmd_health,
         "join": cmd_join,
+        "join-all": cmd_join_all,
         "resolve-user": cmd_resolve_user,
         "dm": cmd_dm,
         "react": cmd_react,
         "upload": cmd_upload,
         "edit": cmd_edit,
     }
-    actions[args.action](args)
+    try:
+        actions[args.action](args)
+        if _has_error:
+            sys.exit(1)
+    except Exception as e:
+        log.exception("Execution of action %s failed", args.action)
+        print(json.dumps({"error": f"Action {args.action} failed: {e!s}"}))
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ tiered, sanitized, and well-formed Mattermost post payloads per MSG-001.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, TypedDict
@@ -132,7 +133,119 @@ def ensure_code_language_tags(content: str) -> str:
     return pattern.sub(_add_tag, content)
 
 
-def format_agent_response(payload: AgentResponsePayload) -> MattermostPostPayload:
+def _handle_raw_json_or_suppression(content: str) -> tuple[str, bool]:
+    """Check for NO_REPLY or raw CLI JSON dumps and convert or suppress per MSG-001.
+
+    Returns (processed_content, is_suppressed).
+    """
+    stripped = content.strip()
+    if not stripped or stripped == "NO_REPLY":
+        return "", True
+
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            data = json.loads(stripped)
+            if isinstance(data, dict):
+                summary = data.get("summary")
+                emails = data.get("emails")
+                if summary is not None or emails is not None:
+                    total = 0
+                    if isinstance(summary, dict):
+                        total = summary.get("total_processed", 0)
+                    email_list = emails if isinstance(emails, list) else []
+                    if total == 0 and not email_list:
+                        # Clean/empty inbox: suppress per Silent-When-Clean (REQ-CRON-013)
+                        return "", True
+
+                    # Convert to human-readable MSG-001 Markdown
+                    lines = [
+                        "### 📥 Executive Email Triage Summary",
+                        f"> **TL;DR**: Triaged {len(email_list)} email(s) ({total} total processed).",
+                        "",
+                    ]
+                    for em in email_list:
+                        if isinstance(em, dict):
+                            lines.append(f"- **From**: {em.get('from', 'unknown')}")
+                            lines.append(f"  **Subject**: {em.get('subject', 'No Subject')}")
+                            lines.append(f"  **Category**: `{em.get('label', 'General')}`")
+                            snip = em.get("snippet", "")
+                            if snip:
+                                lines.append(f"  **Snippet**: {snip[:200]}")
+                    return "\n".join(lines), False
+        except Exception:
+            pass
+
+    return content, False
+
+
+def _chunk_text_by_paragraphs(text: str, max_chunk_chars: int = 3500) -> list[str]:
+    """Split text into chunks up to max_chunk_chars, respecting paragraph (\\n\\n) boundaries.
+
+    If an individual paragraph exceeds max_chunk_chars, it is split on newlines (\\n)
+    or sliced so no chunk ever exceeds max_chunk_chars or MAX_POST_CHARS (4000).
+    Raises ValueError if any chunk exceeds MAX_POST_CHARS.
+    """
+    if not text:
+        return []
+
+    raw_paragraphs = text.split("\n\n")
+    paragraphs: list[str] = []
+    for p in raw_paragraphs:
+        p_str = p.strip()
+        if not p_str:
+            continue
+        if len(p_str) <= max_chunk_chars:
+            paragraphs.append(p_str)
+        else:
+            lines = p_str.split("\n")
+            cur_line_chunk: list[str] = []
+            cur_line_len = 0
+            for line in lines:
+                if len(line) > max_chunk_chars:
+                    if cur_line_chunk:
+                        paragraphs.append("\n".join(cur_line_chunk))
+                        cur_line_chunk = []
+                        cur_line_len = 0
+                    for k in range(0, len(line), max_chunk_chars):
+                        paragraphs.append(line[k : k + max_chunk_chars])
+                elif cur_line_len + len(line) + 1 > max_chunk_chars:
+                    paragraphs.append("\n".join(cur_line_chunk))
+                    cur_line_chunk = [line]
+                    cur_line_len = len(line)
+                else:
+                    cur_line_chunk.append(line)
+                    cur_line_len += len(line) + 1
+            if cur_line_chunk:
+                paragraphs.append("\n".join(cur_line_chunk))
+
+    chunks: list[str] = []
+    current_chunk: list[str] = []
+    current_len = 0
+
+    for p in paragraphs:
+        added_len = len(p) if current_len == 0 else len(p) + 2
+        if current_len + added_len <= max_chunk_chars:
+            current_chunk.append(p)
+            current_len += added_len
+        else:
+            if current_chunk:
+                chunk_str = "\n\n".join(current_chunk)
+                if len(chunk_str) > MAX_POST_CHARS:
+                    raise ValueError(f"Generated chunk length {len(chunk_str)} exceeds MAX_POST_CHARS ({MAX_POST_CHARS})")
+                chunks.append(chunk_str)
+            current_chunk = [p]
+            current_len = len(p)
+
+    if current_chunk:
+        chunk_str = "\n\n".join(current_chunk)
+        if len(chunk_str) > MAX_POST_CHARS:
+            raise ValueError(f"Generated chunk length {len(chunk_str)} exceeds MAX_POST_CHARS ({MAX_POST_CHARS})")
+        chunks.append(chunk_str)
+
+    return chunks
+
+
+def format_agent_response(payload: AgentResponsePayload | dict[str, Any]) -> Any:
     """Core MSG-001 Transformer Function.
     
     Transforms AgentResponsePayload into MattermostPostPayload respecting
@@ -145,8 +258,19 @@ def format_agent_response(payload: AgentResponsePayload) -> MattermostPostPayloa
     target_agent_id = payload.get("target_agent_id")
     root_id = payload.get("root_id")
 
+    # 0. Check for suppression or raw JSON dumps (Issue #812 / MSG-001 / REQ-CRON-013)
+    content, is_suppressed = _handle_raw_json_or_suppression(raw_content)
+    if is_suppressed:
+        return {
+            "channel_id": channel_id,
+            "root_id": root_id,
+            "message": "",
+            "props": {"formatted_by": "MSG-001", "suppressed": True},
+            "overflow_posts": [],
+        }
+
     # 1. Credential Sanitization
-    content = sanitize_output(raw_content)
+    content = sanitize_output(content)
 
     # 2. Markdown Auto-repair
     content = repair_markdown(content)
@@ -196,23 +320,42 @@ def format_agent_response(payload: AgentResponsePayload) -> MattermostPostPayloa
                 tldr_quote = f"> **TL;DR:** {tldr_text}\n\n"
                 content = tldr_quote + content
 
-    # 4. Overflow Handling (> 4000 chars / ERR_MSG_TOO_LONG)
+    # 4. Overflow Handling (> 4000 chars / ERR_MSG_TOO_LONG / Issue #818)
     overflow_posts: list[dict[str, Any]] = []
     if len(content) > MAX_POST_CHARS:
         log.warning("Message length %d exceeds MAX_POST_CHARS (%d) — splitting into thread", len(content), MAX_POST_CHARS)
 
-        # Primary post gets first ~1000 chars + notification
-        primary_body = content[:1000] + "\n\n*(Content exceeds 4000 characters — detailed breakdown continues in thread below)*"
-        remaining_content = content[1000:]
+        # Primary post gets first paragraph chunk near 1000-1500 chars + continuation notice
+        notice = "\n\n*(Content exceeds 4000 characters — detailed breakdown continues in thread below)*"
+        target_split = 1200
 
-        # Split remaining content into 3500-char chunks
-        chunk_size = 3500
-        for i in range(0, len(remaining_content), chunk_size):
-            chunk = remaining_content[i:i + chunk_size]
+        # Look for paragraph boundary between 600 and 1600
+        p_matches = [m.start() for m in re.finditer(r"\n\n", content[:1800])]
+        valid_p = [pos for pos in p_matches if 600 <= pos <= 1600]
+        if valid_p:
+            split_pos = min(valid_p, key=lambda pos: abs(pos - target_split))
+        else:
+            l_matches = [m.start() for m in re.finditer(r"\n", content[:1800])]
+            valid_l = [pos for pos in l_matches if 600 <= pos <= 1600]
+            if valid_l:
+                split_pos = min(valid_l, key=lambda pos: abs(pos - target_split))
+            else:
+                split_pos = 1200
+
+        primary_body = content[:split_pos].rstrip() + notice
+        remaining_content = content[split_pos:].lstrip()
+
+        chunks = _chunk_text_by_paragraphs(remaining_content, max_chunk_chars=3500)
+        for chunk in chunks:
+            if len(chunk) > MAX_POST_CHARS:
+                raise ValueError(f"Generated chunk length {len(chunk)} exceeds MAX_POST_CHARS ({MAX_POST_CHARS})")
             overflow_posts.append({
                 "channel_id": channel_id,
                 "message": chunk,
             })
+
+        if len(primary_body) > MAX_POST_CHARS:
+            raise ValueError(f"Primary body length {len(primary_body)} exceeds MAX_POST_CHARS ({MAX_POST_CHARS})")
 
         content = primary_body
 

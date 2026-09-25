@@ -103,8 +103,20 @@ TRIAGE_RULES: list[tuple[str, str, str]] = [
     ("subject", r"(?i)\b(invoice|receipt|payment|billing)\b", "PARA/Areas"),
 ]
 
-FORCED_CC_ADDRESS = "don@chimexhldg.com"
+DEFAULT_CC_ADDRESS = os.environ.get("OPENCLAW_FORCED_CC", "don@chimexhldg.com")
+FORCED_CC_ADDRESS = DEFAULT_CC_ADDRESS
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+
+def get_trusted_senders(principal: str | None = None) -> list[str]:
+    """Return list of trusted sender addresses/prefixes based on acting principal (Issue #680, #684)."""
+    p = (principal or os.environ.get("OPENCLAW_AGENT_NAME", "roho")).lower()
+    if p == "amara":
+        return ["don@", "roho@", "donorazulume@gmail.com", "don@chimexhldg.com", "roho@chimexhldg.com"]
+    if p == "roho":
+        return ["don@", "donorazulume@gmail.com", "don@chimexhldg.com"]
+    return ["don@", "roho@", "donorazulume@gmail.com", "don@chimexhldg.com", "roho@chimexhldg.com"]
+
 
 _email_counters: dict[str, int] = {
     "agent_emails_sent_total": 0,
@@ -202,6 +214,51 @@ def _rule_target(subject: Any, from_addr: Any) -> str | None:
 
 # ── Actions ──────────────────────────────────────────────────────────
 
+_GMAIL_LABEL_ID_CACHE: dict[str, str] = {}
+
+
+def _resolve_gmail_label_id(label_name: str) -> str:
+    """Resolve human-readable label name to Gmail label ID (Issue #813 / #605 / #663).
+
+    Returns Gmail label ID (e.g. 'Label_22') or system label ID (e.g. 'INBOX').
+    Auto-provisions missing labels via google_mail_create_label.
+    """
+    cleaned = str(label_name or "").strip()
+    if not cleaned:
+        return cleaned
+
+    # System labels or already-resolved label IDs
+    if cleaned.startswith("Label_") or (cleaned.isupper() and "/" not in cleaned):
+        return cleaned
+
+    if cleaned in _GMAIL_LABEL_ID_CACHE:
+        return _GMAIL_LABEL_ID_CACHE[cleaned]
+
+    # Fetch labels from Gmail API
+    try:
+        res = _call("google_mail_list_labels")
+        raw_labels = res.get("labels", []) if isinstance(res, dict) else (res if isinstance(res, list) else [])
+        for lbl in raw_labels:
+            if isinstance(lbl, dict) and "name" in lbl and "id" in lbl:
+                _GMAIL_LABEL_ID_CACHE[lbl["name"]] = lbl["id"]
+    except Exception as exc:
+        log.warning("Could not list Gmail labels for resolution: %s", exc)
+
+    if cleaned in _GMAIL_LABEL_ID_CACHE:
+        return _GMAIL_LABEL_ID_CACHE[cleaned]
+
+    # If missing, attempt to auto-create and cache
+    try:
+        c_res = _call("google_mail_create_label", name=cleaned)
+        lid = c_res.get("id") if isinstance(c_res, dict) else None
+        if lid:
+            _GMAIL_LABEL_ID_CACHE[cleaned] = lid
+            return lid
+    except Exception as exc:
+        log.warning("Could not auto-create Gmail label '%s': %s", cleaned, exc)
+
+    return cleaned
+
 
 def init_labels() -> dict[str, str]:
     """Initialize and verify ETS and PARA labels/categories on Google Gmail and M365."""
@@ -222,11 +279,13 @@ def init_labels() -> dict[str, str]:
                 if name in existing:
                     lid = existing[name]
                     label_map[name] = lid
+                    _GMAIL_LABEL_ID_CACHE[name] = lid
                     print(f"  ✓ Google Gmail label ready: {name} (id={lid})")
                 else:
                     c_res = _call("google_mail_create_label", name=name)
-                    lid = c_res.get("id") or name
+                    lid = (c_res.get("id") if isinstance(c_res, dict) else None) or name
                     label_map[name] = lid
+                    _GMAIL_LABEL_ID_CACHE[name] = lid
                     print(f"  ✓ Google Gmail label provisioned: {name} (id={lid})")
         except Exception as exc:
             log.warning("Google label initialization warning: %s", exc)
@@ -237,6 +296,7 @@ def init_labels() -> dict[str, str]:
 
     print("\nDone. All categories/labels are ready.")
     return label_map
+
 
 
 def _list_inbox_messages(top: int = 100, folder: str = "inbox", filter_unread: bool = False) -> list[dict[str, Any]]:
@@ -381,7 +441,8 @@ def triage(limit: int = 50) -> None:
 
         source = msg.get("source", "google")
         if source == "google":
-            _call("google_mail_label", message_id=msg["id"], add_labels=[target])
+            target_id = _resolve_gmail_label_id(target)
+            _call("google_mail_label", message_id=msg["id"], add_labels=[target_id])
         else:
             new_cats = list(set(cats + [target]))
             _call("m365_mail_update_categories", message_id=msg["id"], categories=new_cats)
@@ -398,8 +459,12 @@ def triage(limit: int = 50) -> None:
     print(f"{'Remaining in INBOX':<25} {skipped:>8}\n")
 
 
-def dispatch_to_clickup_orchestrator(email_record: dict[str, Any]) -> None:
-    """Bind triaged email dispatch to ClickUp Orchestration via log-or-create stable per-email anchor (#537)."""
+def dispatch_to_clickup_orchestrator(
+    email_record: dict[str, Any],
+    principal: str = "roho",
+    mailbox: str = "",
+) -> None:
+    """Bind triaged email dispatch to ClickUp Orchestration via log-or-create stable per-email anchor (Issue #537, #680, #684)."""
     import subprocess
 
     email_id = str(email_record.get("id") or "").strip()
@@ -407,7 +472,7 @@ def dispatch_to_clickup_orchestrator(email_record: dict[str, Any]) -> None:
         return
 
     sanitised_id = re.sub(r"[^a-zA-Z0-9_-]", "_", email_id)
-    anchor_id = f"gmail-triage-{sanitised_id}"
+    anchor_id = f"mail-triage-{principal}-{sanitised_id}"
     event_id = f"evt-{anchor_id}-{int(time.time())}"
 
     subject = email_record.get("subject", "(no subject)")
@@ -417,22 +482,25 @@ def dispatch_to_clickup_orchestrator(email_record: dict[str, Any]) -> None:
 
     triage_list_name = os.environ.get("CLICKUP_ORCH_LIST_TRIAGE", "Auto-Triage")
 
+    # Primary assignee defaults to acting principal owning the inbox
+    assignee = principal
+    handoff_note = ""
+
     combined_text = f"{subject} {from_addr} {snippet}".lower()
-    if any(term in combined_text for term in ["property", "tenant", "lease", "rent", "chimex", "flat", "amara"]):
-        assignee = "amara"
-    elif any(term in combined_text for term in ["trading", "trade212", "finance", "bank", "invoice", "billing", "rob"]):
-        assignee = "rob"
-    else:
-        assignee = "roho"
+    if principal == "roho":
+        if any(term in combined_text for term in ["property", "tenant", "lease", "rent", "chimex", "flat", "amara"]):
+            handoff_note = "\n- **Secondary Handoff:** @amara (Property Domain detected)"
+        elif any(term in combined_text for term in ["trading", "trade212", "finance", "bank", "invoice", "billing", "rob"]):
+            handoff_note = "\n- **Secondary Handoff:** @rob (Finance/Trading Domain detected)"
 
     priority = "high" if email_record.get("importance") == "high" else "normal"
 
     comment_body = (
-        f"**Gmail Auto-Triage Dispatch**\n"
+        f"**Email Auto-Triage Dispatch ({principal.upper()})**\n"
         f"- **From:** {from_addr}\n"
         f"- **Subject:** {subject}\n"
         f"- **Category:** {label}\n"
-        f"- **Attributable Agent:** @{assignee}\n"
+        f"- **Attributable Owner:** @{assignee}{handoff_note}\n"
         f"- **Snippet:** {snippet[:500]}\n"
     )
 
@@ -457,7 +525,7 @@ def dispatch_to_clickup_orchestrator(email_record: dict[str, Any]) -> None:
         "log-or-create",
         "--anchor-id", anchor_id,
         "--event-id", event_id,
-        "--name", f"[Email Triage] {subject[:100]}",
+        "--name", f"[{principal.upper()} Email] {subject[:100]}",
         "--comment", comment_body,
         "--list-name", triage_list_name,
         "--priority", priority,
@@ -473,9 +541,18 @@ def dispatch_to_clickup_orchestrator(email_record: dict[str, Any]) -> None:
         log.warning("ClickUp Orchestration dispatch failed for %s: %s", anchor_id, exc)
 
 
-def _process_messages_and_print_report(messages: list[dict[str, Any]]) -> None:
-    """Helper to process messages list, apply ETS labels, and print JSON report."""
+def _process_messages_and_print_report(
+    messages: list[dict[str, Any]],
+    principal: str = "roho",
+    mailbox: str = "",
+    is_event: bool = False,
+    output_format: str = "json",
+) -> None:
+    """Helper to process messages list, apply ETS labels, and print report (Issue #678, #680, #684, #742, #812)."""
     if not messages:
+        if is_event or output_format == "markdown":
+            log.info("Zero messages in triage — exiting silently (silence invariant / REQ-CRON-013)")
+            return
         print(json.dumps({
             "summary": {"total_processed": 0, "moved": {}, "remained_inbox": 0},
             "emails": [],
@@ -485,15 +562,19 @@ def _process_messages_and_print_report(messages: list[dict[str, Any]]) -> None:
     email_records: list[dict[str, Any]] = []
     moved: dict[str, int] = {}
     filing_errors: dict[str, int] = {}
+    trusted_prefixes = get_trusted_senders(principal)
 
     for msg in messages:
         subject = msg.get("subject", "")
         from_dict = msg.get("from", {})
         from_addr = (from_dict.get("emailAddress", {}).get("address") if isinstance(from_dict, dict) else str(from_dict)) or msg.get("from_raw", "")
         snippet = msg.get("bodyPreview") or msg.get("snippet") or ""
-        cats = msg.get("categories", [])
+        cats = msg.get("categories") or msg.get("labels") or []
 
-        has_ets_cat = any(cat in ETS_LABELS for cat in cats)
+        has_ets_cat = any(
+            (cat in ETS_LABELS or cat in _GMAIL_LABEL_ID_CACHE.values())
+            for cat in cats
+        )
         target = None
         classification = "unmatched"
         importance = "normal"
@@ -513,6 +594,7 @@ def _process_messages_and_print_report(messages: list[dict[str, Any]]) -> None:
             "subject": subject,
             "snippet": snippet,
             "source": msg.get("source", "google"),
+            "principal": principal,
         }
 
         if target:
@@ -522,12 +604,13 @@ def _process_messages_and_print_report(messages: list[dict[str, Any]]) -> None:
             source = msg.get("source", "google")
             label_ok = False
             if source == "google":
-                resp = _call("google_mail_label", message_id=msg["id"], add_labels=[target])
+                target_id = _resolve_gmail_label_id(target)
+                resp = _call("google_mail_label", message_id=msg["id"], add_labels=[target_id])
                 if isinstance(resp, dict) and not resp.get("error"):
                     label_ok = True
                 else:
                     err_msg = resp.get("error", {}) if isinstance(resp, dict) else str(resp)
-                    log.warning("Failed to apply label '%s' to msg %s: %s", target, msg["id"], err_msg)
+                    log.warning("Failed to apply label '%s' (id='%s') to msg %s: %s", target, target_id, msg["id"], err_msg)
                     filing_errors[target] = filing_errors.get(target, 0) + 1
                     record["filing_error"] = str(err_msg)
             else:
@@ -566,7 +649,7 @@ def _process_messages_and_print_report(messages: list[dict[str, Any]]) -> None:
             attachments = body.get("attachments", [])
 
         from_addr = r.get("from", "")
-        is_trusted = any(from_addr.lower().startswith(prefix) for prefix in ["don@", "roho@"])
+        is_trusted = any(from_addr.lower().startswith(prefix) or from_addr.lower() == prefix for prefix in trusted_prefixes)
         sanitized_text, _ = prompt_injection.sanitize_text(text, is_trusted=is_trusted)
         truncated_text = sanitized_text[:3000]
         r["body_preview"] = prompt_injection.wrap_content(
@@ -577,14 +660,43 @@ def _process_messages_and_print_report(messages: list[dict[str, Any]]) -> None:
         if attachments:
             r["attachments"] = attachments
 
-    # Dispatch per-email stable ClickUp anchors (#537)
+    # Dispatch per-email stable ClickUp anchors (#537, #680)
     for rec in email_records:
         try:
-            dispatch_to_clickup_orchestrator(rec)
+            dispatch_to_clickup_orchestrator(rec, principal=principal, mailbox=mailbox)
         except Exception as exc:
             log.warning("Failed ClickUp dispatch for email %s: %s", rec.get("id"), exc)
 
     skipped = sum(1 for r in email_records if r["label"] == "INBOX")
+    actionable_records = [
+        r for r in email_records
+        if r.get("classification") != "already_triaged" and r.get("label") != "INBOX"
+    ]
+
+    if is_event or output_format == "markdown":
+        if not actionable_records and not filing_errors:
+            log.info("All messages already triaged or non-actionable — exiting silently (silence invariant / REQ-CRON-013)")
+            return
+        lines = [
+            f"### 📥 Actionable Email Triage ({len(actionable_records)} item(s))",
+            f"> **TL;DR**: Triaged {len(actionable_records)} actionable email(s) across {len(messages)} message(s).",
+            "",
+        ]
+        for r in actionable_records:
+            lines.append(f"- **From**: {r.get('from', 'unknown')}")
+            lines.append(f"  **Subject**: {r.get('subject', 'No Subject')}")
+            lines.append(f"  **Category**: `{r.get('label', 'General')}` (Priority: {r.get('importance', 'normal')})")
+            snip = r.get("snippet", "")
+            if snip:
+                lines.append(f"  **Snippet**: {snip[:200]}")
+        if filing_errors:
+            lines.append("")
+            lines.append("### ⚠️ Filing Warnings")
+            for cat, count in filing_errors.items():
+                lines.append(f"- Category `{cat}`: {count} failure(s)")
+        print("\n".join(lines))
+        return
+
     summary_dict: dict[str, Any] = {
         "total_processed": len(messages),
         "moved": moved,
@@ -602,8 +714,13 @@ def _process_messages_and_print_report(messages: list[dict[str, Any]]) -> None:
     ))
 
 
-def triage_report(limit: int = 15) -> None:
-    """Triage messages and print a JSON report with previews for high priority."""
+def triage_report(
+    limit: int = 15,
+    principal: str = "roho",
+    mailbox: str = "",
+    output_format: str = "json",
+) -> None:
+    """Triage messages and print a JSON or Markdown report with previews for high priority."""
     # Baseline history cursor if not present
     triage_state_path = ".gmail_triage_state.json"
     try:
@@ -621,12 +738,76 @@ def triage_report(limit: int = 15) -> None:
     except Exception as exc:
         log.debug("Could not baseline history cursor in triage_report: %s", exc)
 
+    backend = os.environ.get("OPENCLAW_MAIL_BACKEND", "auto").lower()
+    if backend in ("google", "auto", "all") and not _GMAIL_LABEL_ID_CACHE:
+        try:
+            _resolve_gmail_label_id("01_Action")
+        except Exception:
+            pass
+
     messages = _list_inbox_messages(top=limit)
-    _process_messages_and_print_report(messages)
+    _process_messages_and_print_report(
+        messages,
+        principal=principal,
+        mailbox=mailbox,
+        output_format=output_format,
+    )
 
 
-def event_triage(history_id: str | None = None, limit: int = 15) -> None:
-    """Triage incoming messages delta triggered by PubSub event wake (Issue #634, #653, #662 / GET-E1)."""
+def render_summary(limit: int = 15, principal: str = "roho", mailbox: str = "") -> str:
+    """Generate a clean executive summary Markdown document from inbox messages (REQ-CRON-002 / Issue #708)."""
+    messages = _list_inbox_messages(top=limit)
+    if not messages:
+        out = "### 📥 Gmail Executive Triage — Clean Inbox\n* No unread or actionable messages found in inbox."
+        print(out)
+        return out
+
+    action_emails = []
+    fyi_emails = []
+    other_emails = []
+
+    for msg in messages:
+        subject = msg.get("subject", "No Subject")
+        from_dict = msg.get("from", {})
+        from_addr = (from_dict.get("emailAddress", {}).get("address") if isinstance(from_dict, dict) else str(from_dict)) or msg.get("from_raw", "")
+        snippet = msg.get("bodyPreview") or msg.get("snippet") or ""
+        target = expert_judgment_from_headers(subject, from_addr) or _rule_target(subject, from_addr) or "INBOX"
+
+        entry = f"- **From**: `{from_addr}`\n  **Subject**: {subject}\n  **Category**: `{target}`\n  **Snippet**: {snippet[:200]}"
+        if target in ("01_Action", "PARA/Areas"):
+            action_emails.append(entry)
+        elif target in ("03_Read", "PARA/Resources"):
+            fyi_emails.append(entry)
+        else:
+            other_emails.append(entry)
+
+    lines = ["## 📥 Executive Inbox Summary", f"* **Total Processed**: {len(messages)}", ""]
+    if action_emails:
+        lines.append("### ⚡ Urgent / Action Required")
+        lines.extend(action_emails)
+        lines.append("")
+    if fyi_emails:
+        lines.append("### 📖 Informational / Read")
+        lines.extend(fyi_emails)
+        lines.append("")
+    if other_emails:
+        lines.append("### 📁 Other Processed")
+        lines.extend(other_emails)
+        lines.append("")
+
+    summary_text = "\n".join(lines)
+    print(summary_text)
+    return summary_text
+
+
+def event_triage(
+    history_id: str | None = None,
+    message_id: str | None = None,
+    limit: int = 15,
+    principal: str = "roho",
+    mailbox: str = "",
+) -> None:
+    """Triage incoming message(s) triggered by event wake (Issue #678, #683, #684)."""
     triage_state_path = ".gmail_triage_state.json"
     state: dict[str, Any] = {}
     if os.path.exists(triage_state_path):
@@ -639,12 +820,56 @@ def event_triage(history_id: str | None = None, limit: int = 15) -> None:
     now_iso = datetime.now(timezone.utc).isoformat()
     state["last_wake"] = now_iso
 
-    start_hid = history_id or state.get("latest_history_id")
     messages: list[dict[str, Any]] = []
-    delta_queried = False
 
+    # 1. Atomic Single Message Processing (Don Directive 31-Aug-2026 / #678, #814)
+    if message_id:
+        log.info("Processing single event-driven email: message_id=%s (principal=%s)", message_id, principal)
+        msg_data = None
+        backend = os.environ.get("OPENCLAW_MAIL_BACKEND", "auto").lower()
+        is_gmail_id = bool(re.match(r'^[0-9a-fA-F]{16}$', str(message_id).strip()))
+
+        if backend in ("google", "auto") or not mailbox or "gmail.com" in mailbox or is_gmail_id:
+            try:
+                msg_data = _call("google_mail_read", message_id=message_id)
+                if msg_data and "id" in msg_data and not msg_data.get("error"):
+                    msg_data["source"] = "google"
+                    if "labels" in msg_data and "categories" not in msg_data:
+                        msg_data["categories"] = msg_data["labels"]
+            except Exception as exc:
+                log.warning("Google single message read failed for %s: %s", message_id, exc)
+
+        # Do NOT fall back to M365 if backend is google, mailbox is gmail, or message_id is a 16-hex Gmail ID (Issue #814)
+        should_try_m365 = (
+            (not msg_data or "error" in msg_data)
+            and backend in ("m365", "auto")
+            and not is_gmail_id
+            and (not mailbox or "gmail.com" not in mailbox)
+        )
+        if should_try_m365:
+            try:
+                msg_data = _call("m365_mail_read", message_id=message_id)
+                if msg_data and "id" in msg_data and not msg_data.get("error"):
+                    msg_data["source"] = "m365"
+            except Exception as exc:
+                log.warning("M365 single message read failed for %s: %s", message_id, exc)
+
+        if msg_data and "id" in msg_data and not msg_data.get("error"):
+            messages.append(msg_data)
+
+        _process_messages_and_print_report(messages, principal=principal, mailbox=mailbox, is_event=True)
+        state["last_run_at"] = now_iso
+        state["last_event_triage"] = now_iso
+        try:
+            with open(triage_state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+        except Exception as exc:
+            log.debug("Could not update .gmail_triage_state.json: %s", exc)
+        return
+
+    # 2. History Delta Stream Processing
+    start_hid = history_id or state.get("latest_history_id")
     if not start_hid:
-        # Attempt to baseline cursor via google_mail_profile
         try:
             prof = _call("google_mail_profile")
             hid = prof.get("history_id") or prof.get("historyId")
@@ -657,12 +882,10 @@ def event_triage(history_id: str | None = None, limit: int = 15) -> None:
     if start_hid:
         log.info("Fetching Gmail delta history starting from historyId=%s", start_hid)
         hist_resp = _call("google_mail_get_history", start_history_id=str(start_hid))
-        delta_queried = True
         new_history_id = hist_resp.get("latest_history_id") or hist_resp.get("history_id")
         if new_history_id:
             state["latest_history_id"] = str(new_history_id)
 
-        # Extract message ids added: support normalized messages_added and raw history records
         added_msg_ids: list[str] = []
         for item in hist_resp.get("messages_added", []):
             mid = item.get("id") if isinstance(item, dict) else (item if isinstance(item, str) else None)
@@ -679,16 +902,16 @@ def event_triage(history_id: str | None = None, limit: int = 15) -> None:
                     added_msg_ids.append(msg_info["id"])
 
         for msg_id in added_msg_ids[:limit]:
-            msg_data = _call("google_mail_get_message", message_id=msg_id)
-            if msg_data and "id" in msg_data:
+            msg_data = _call("google_mail_read", message_id=msg_id)
+            if msg_data and "id" in msg_data and not msg_data.get("error"):
                 msg_data["source"] = "google"
+                if "labels" in msg_data and "categories" not in msg_data:
+                    msg_data["categories"] = msg_data["labels"]
                 messages.append(msg_data)
 
-    if not delta_queried and not messages:
-        # Fallback to recent unread/inbox messages only when no historyId was available
-        messages = _list_inbox_messages(top=limit)
 
-    _process_messages_and_print_report(messages)
+    # Pure event-driven path: if delta is empty, output clean report with 0 processed (ZERO batch fallback)
+    _process_messages_and_print_report(messages, principal=principal, mailbox=mailbox, is_event=True)
 
     state["last_run_at"] = now_iso
     state["last_event_triage"] = now_iso
@@ -997,11 +1220,13 @@ def main() -> None:
         "--action",
         required=True,
         choices=[
-            "init", "status", "triage", "triage-report", "event-triage", "draft", "send",
+            "init", "status", "triage", "triage-report", "render-summary", "event-triage", "email-event-triage", "draft", "send",
             "labels", "digest", "search", "download-attachment", "track-threads",
         ],
     )
     parser.add_argument("--limit", type=int, default=15)
+    parser.add_argument("--principal", choices=["don", "roho", "amara"], default=os.environ.get("OPENCLAW_AGENT_NAME", "roho").lower())
+    parser.add_argument("--mailbox", default="", help="Target mailbox address (e.g. roho@chimexhldg.com)")
     parser.add_argument("--history-id", dest="history_id", help="Gmail PubSub historyId for delta triage")
     parser.add_argument("--thread-id", dest="thread_id")  # Mapped to message_id in M365
     parser.add_argument("--message-id", dest="message_id")
@@ -1013,6 +1238,7 @@ def main() -> None:
     parser.add_argument("--body-markdown", dest="body_markdown")
     parser.add_argument("--body")
     parser.add_argument("--query")
+    parser.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format (default: json)")
     parser.add_argument("--batch-size", type=int, default=15, help=argparse.SUPPRESS)
     parser.add_argument("--batch-delay", type=float, default=1.0, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -1030,9 +1256,17 @@ def main() -> None:
     elif args.action == "triage":
         triage(limit=args.limit)
     elif args.action == "triage-report":
-        triage_report(limit=args.limit)
-    elif args.action == "event-triage":
-        event_triage(history_id=args.history_id, limit=args.limit)
+        triage_report(limit=args.limit, principal=args.principal, mailbox=args.mailbox, output_format=args.format)
+    elif args.action == "render-summary":
+        render_summary(limit=args.limit, principal=args.principal, mailbox=args.mailbox)
+    elif args.action in ("event-triage", "email-event-triage"):
+        event_triage(
+            history_id=args.history_id,
+            message_id=args.message_id,
+            limit=args.limit,
+            principal=args.principal,
+            mailbox=args.mailbox,
+        )
     elif args.action == "download-attachment":
         msg_id = args.message_id or args.thread_id
         if not msg_id or not args.part_id:
