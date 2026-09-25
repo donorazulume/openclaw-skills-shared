@@ -31,11 +31,14 @@ _tmp = tempfile.mkdtemp(prefix="email_ops_tests_")
 os.environ["OPENCLAW_DATA_DIR"] = _tmp
 
 # Triage module must load first because email_ops imports send_email lazily.
-triage_spec = importlib.util.spec_from_file_location("triage", str(_here / "triage.py"))
-assert triage_spec is not None and triage_spec.loader is not None
-triage = importlib.util.module_from_spec(triage_spec)
-sys.modules["triage"] = triage
-triage_spec.loader.exec_module(triage)
+if "triage" in sys.modules:
+    triage = sys.modules["triage"]
+else:
+    triage_spec = importlib.util.spec_from_file_location("triage", str(_here / "triage.py"))
+    assert triage_spec is not None and triage_spec.loader is not None
+    triage = importlib.util.module_from_spec(triage_spec)
+    sys.modules["triage"] = triage
+    triage_spec.loader.exec_module(triage)
 
 spec = importlib.util.spec_from_file_location("email_ops", str(_here / "email_ops.py"))
 assert spec is not None and spec.loader is not None
