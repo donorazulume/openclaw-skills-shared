@@ -1,0 +1,12 @@
+# .graphifyignore — openclaw-skills-shared
+node_modules/
+.venv/
+graphify-out/
+graphify-out/cache/
+*.min.js
+*.map
+tests/fixtures/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.lock

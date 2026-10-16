@@ -1,0 +1,3 @@
+# .graphifyrc — openclaw-skills-shared
+viz_node_limit=0
+language.inc=sql

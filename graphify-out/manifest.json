@@ -1,0 +1,308 @@
+{
+  "clickup-manager/manager.py": {
+    "mtime": 1786182234.5907521,
+    "seen": 1792178829.7592041,
+    "ast_hash": "3291248b45e6a3791e60ac4efdb27c1e",
+    "semantic_hash": "3291248b45e6a3791e60ac4efdb27c1e"
+  },
+  "clickup-manager/test_expert_judgment.py": {
+    "mtime": 1788000879.149728,
+    "seen": 1792178829.759213,
+    "ast_hash": "8f13028cdd9c04979f5e82f4a2532f82",
+    "semantic_hash": "8f13028cdd9c04979f5e82f4a2532f82"
+  },
+  "clickup-manager/test_manager.py": {
+    "mtime": 1788000879.1502488,
+    "seen": 1792178829.759219,
+    "ast_hash": "403c63e21bef34a5ea98b7dc74a2e64f",
+    "semantic_hash": "403c63e21bef34a5ea98b7dc74a2e64f"
+  },
+  "gmail-executive/email_ops.py": {
+    "mtime": 1779211971.002996,
+    "seen": 1792178829.7592242,
+    "ast_hash": "73520ada051bd9a78099d47d848af4bb",
+    "semantic_hash": "73520ada051bd9a78099d47d848af4bb"
+  },
+  "gmail-executive/test_email_ops.py": {
+    "mtime": 1790314140.3649385,
+    "seen": 1792178829.759229,
+    "ast_hash": "65ac6af24fca0ef0d08ad01f5e2827d9",
+    "semantic_hash": "65ac6af24fca0ef0d08ad01f5e2827d9"
+  },
+  "gmail-executive/test_triage.py": {
+    "mtime": 1790314121.9262798,
+    "seen": 1792178829.759237,
+    "ast_hash": "1e57b23ebfe49c21db74952583910c4d",
+    "semantic_hash": "1e57b23ebfe49c21db74952583910c4d"
+  },
+  "gmail-executive/triage.py": {
+    "mtime": 1790309874.4013212,
+    "seen": 1792178829.759242,
+    "ast_hash": "c7556b0947d7669ccd44ce89377c3722",
+    "semantic_hash": "c7556b0947d7669ccd44ce89377c3722"
+  },
+  "google-manager/manager.py": {
+    "mtime": 1780637256.9512396,
+    "seen": 1792178829.759247,
+    "ast_hash": "1caa83c2a8b7423e925e651f97f867e8",
+    "semantic_hash": "1caa83c2a8b7423e925e651f97f867e8"
+  },
+  "google-manager/test_manager.py": {
+    "mtime": 1788000879.15175,
+    "seen": 1792178829.759252,
+    "ast_hash": "25b5d02e5518298be6c3d8bc40fa4641",
+    "semantic_hash": "25b5d02e5518298be6c3d8bc40fa4641"
+  },
+  "google-manager/test_security.py": {
+    "mtime": 1788000879.1521275,
+    "seen": 1792178829.7592561,
+    "ast_hash": "a74fc020ec9a30f26e3da3294edcd47e",
+    "semantic_hash": "a74fc020ec9a30f26e3da3294edcd47e"
+  },
+  "lib/call_mcp.py": {
+    "mtime": 1788000879.1720915,
+    "seen": 1792178829.759261,
+    "ast_hash": "2006f6f2e133f68a02be8bab8d8d3a2a",
+    "semantic_hash": "2006f6f2e133f68a02be8bab8d8d3a2a"
+  },
+  "lib/clickup_client.py": {
+    "mtime": 1788000879.1724067,
+    "seen": 1792178829.759267,
+    "ast_hash": "63173f83a47b2d7a19f8b3d7e4ac6309",
+    "semantic_hash": "63173f83a47b2d7a19f8b3d7e4ac6309"
+  },
+  "lib/cron_db.py": {
+    "mtime": 1788614241.440123,
+    "seen": 1792178829.7592719,
+    "ast_hash": "23c72f37791f3347757569ddb51e01af",
+    "semantic_hash": "23c72f37791f3347757569ddb51e01af"
+  },
+  "lib/email_utils.py": {
+    "mtime": 1788000879.1735415,
+    "seen": 1792178829.759276,
+    "ast_hash": "685635464a210e7a6f6f13fdd738ba51",
+    "semantic_hash": "685635464a210e7a6f6f13fdd738ba51"
+  },
+  "lib/firefly_extractor.py": {
+    "mtime": 1788000879.173828,
+    "seen": 1792178829.759281,
+    "ast_hash": "d61d3743d1c770a9cc5fd8ae21430651",
+    "semantic_hash": "d61d3743d1c770a9cc5fd8ae21430651"
+  },
+  "lib/github_token.py": {
+    "mtime": 1788000879.1740525,
+    "seen": 1792178829.759286,
+    "ast_hash": "47e92febb4c525b24ba90a9aa4a1187b",
+    "semantic_hash": "47e92febb4c525b24ba90a9aa4a1187b"
+  },
+  "lib/google_clients.py": {
+    "mtime": 1788000831.3982127,
+    "seen": 1792178829.7592902,
+    "ast_hash": "8f31360af78bad5a51339567a855a826",
+    "semantic_hash": "8f31360af78bad5a51339567a855a826"
+  },
+  "lib/google_token_store.py": {
+    "mtime": 1788000879.1743832,
+    "seen": 1792178829.759295,
+    "ast_hash": "09e5fae3565062a5900637f63c5910b5",
+    "semantic_hash": "09e5fae3565062a5900637f63c5910b5"
+  },
+  "lib/mattermost_formatter.py": {
+    "mtime": 1790308989.9989586,
+    "seen": 1792178829.7593,
+    "ast_hash": "41a04903d7ec2a36b26039d0a7af3c90",
+    "semantic_hash": "41a04903d7ec2a36b26039d0a7af3c90"
+  },
+  "lib/mcp_adapter_factory.py": {
+    "mtime": 1788022817.0402887,
+    "seen": 1792178829.759304,
+    "ast_hash": "9530bb05766a71c7b66ea252ca4fa136",
+    "semantic_hash": "9530bb05766a71c7b66ea252ca4fa136"
+  },
+  "lib/mcp_bible.py": {
+    "mtime": 1788000879.1752837,
+    "seen": 1792178829.759309,
+    "ast_hash": "15c09d300f47326ae5de436db44e6ff5",
+    "semantic_hash": "15c09d300f47326ae5de436db44e6ff5"
+  },
+  "lib/mcp_client_cli.py": {
+    "mtime": 1788000879.1755009,
+    "seen": 1792178829.7593129,
+    "ast_hash": "c9ce217e717739b03133c1a0d7af0fcf",
+    "semantic_hash": "c9ce217e717739b03133c1a0d7af0fcf"
+  },
+  "lib/mcp_comms.py": {
+    "mtime": 1788000879.1757112,
+    "seen": 1792178829.759318,
+    "ast_hash": "fedcd515380512f3b8fa96f4b415990f",
+    "semantic_hash": "fedcd515380512f3b8fa96f4b415990f"
+  },
+  "lib/mcp_firefly.py": {
+    "mtime": 1788038026.579091,
+    "seen": 1792178829.759325,
+    "ast_hash": "88770191a7b435826763172407a3c040",
+    "semantic_hash": "88770191a7b435826763172407a3c040"
+  },
+  "lib/mcp_google.py": {
+    "mtime": 1788000831.403109,
+    "seen": 1792178829.759329,
+    "ast_hash": "86d7d419c87363939958861759fbc9a9",
+    "semantic_hash": "86d7d419c87363939958861759fbc9a9"
+  },
+  "lib/mcp_lifeos.py": {
+    "mtime": 1788000879.1761777,
+    "seen": 1792178829.7593331,
+    "ast_hash": "893656c8e92176dd0edeabe8571ab3e2",
+    "semantic_hash": "893656c8e92176dd0edeabe8571ab3e2"
+  },
+  "lib/mcp_m365.py": {
+    "mtime": 1788000881.7725668,
+    "seen": 1792178829.759338,
+    "ast_hash": "4d8883371a09063113d72c0ec6d30e53",
+    "semantic_hash": "4d8883371a09063113d72c0ec6d30e53"
+  },
+  "lib/mcp_model_router.py": {
+    "mtime": 1790367968.432063,
+    "seen": 1792178829.7593422,
+    "ast_hash": "f72eeb25173d93e5bbde2ac4abbe2895",
+    "semantic_hash": "f72eeb25173d93e5bbde2ac4abbe2895"
+  },
+  "lib/mcp_orchestrator.py": {
+    "mtime": 1788122596.8534436,
+    "seen": 1792178829.759347,
+    "ast_hash": "96e6b5f651e93cfb8b594d5d478cf887",
+    "semantic_hash": "96e6b5f651e93cfb8b594d5d478cf887"
+  },
+  "lib/mcp_productivity.py": {
+    "mtime": 1788000879.1776717,
+    "seen": 1792178829.759352,
+    "ast_hash": "0f7b8d024cc57fff55e7863ef0a6aa93",
+    "semantic_hash": "0f7b8d024cc57fff55e7863ef0a6aa93"
+  },
+  "lib/mcp_research.py": {
+    "mtime": 1788000879.178004,
+    "seen": 1792178829.759356,
+    "ast_hash": "9b807eeff3293b6ab162d554fde9cdff",
+    "semantic_hash": "9b807eeff3293b6ab162d554fde9cdff"
+  },
+  "lib/mcp_trade212.py": {
+    "mtime": 1788000879.1783473,
+    "seen": 1792178829.75936,
+    "ast_hash": "fb7d3146334bcfa48b67d4cf2af1264c",
+    "semantic_hash": "fb7d3146334bcfa48b67d4cf2af1264c"
+  },
+  "lib/prompt_injection.py": {
+    "mtime": 1788000879.1787055,
+    "seen": 1792178829.7593641,
+    "ast_hash": "70de90e83577372d71e46f77a5cbe273",
+    "semantic_hash": "70de90e83577372d71e46f77a5cbe273"
+  },
+  "lib/push_lifeos_section.py": {
+    "mtime": 1788029975.977825,
+    "seen": 1792178829.759369,
+    "ast_hash": "783b592827a87b47523221d7a21b1461",
+    "semantic_hash": "783b592827a87b47523221d7a21b1461"
+  },
+  "lib/research_gate.py": {
+    "mtime": 1788000879.1793935,
+    "seen": 1792178829.7593741,
+    "ast_hash": "6695a83f816ba30a7b3989bebda90892",
+    "semantic_hash": "6695a83f816ba30a7b3989bebda90892"
+  },
+  "lib/run_amara_property.py": {
+    "mtime": 1790367968.4331982,
+    "seen": 1792178829.7593799,
+    "ast_hash": "f5de12dad25db06938fde8feb2bf1fa4",
+    "semantic_hash": "f5de12dad25db06938fde8feb2bf1fa4"
+  },
+  "lib/run_letter_analyst_push.py": {
+    "mtime": 1788000879.1799843,
+    "seen": 1792178829.7593842,
+    "ast_hash": "196bd8b9a2740ed8d972ff2ea78caef7",
+    "semantic_hash": "196bd8b9a2740ed8d972ff2ea78caef7"
+  },
+  "lib/run_morning_briefing.py": {
+    "mtime": 1790367968.4341214,
+    "seen": 1792178829.759389,
+    "ast_hash": "7ac23162b1423a3feaf55e9a24846e82",
+    "semantic_hash": "7ac23162b1423a3feaf55e9a24846e82"
+  },
+  "lib/run_rob_portfolio.py": {
+    "mtime": 1790367968.434828,
+    "seen": 1792178829.759396,
+    "ast_hash": "a40628f4344b31aae82fba171fa1fedf",
+    "semantic_hash": "a40628f4344b31aae82fba171fa1fedf"
+  },
+  "lib/test_email_utils.py": {
+    "mtime": 1788000831.4169967,
+    "seen": 1792178829.7594008,
+    "ast_hash": "f0f797ca3006b6d09985ead15e9c83ac",
+    "semantic_hash": "f0f797ca3006b6d09985ead15e9c83ac"
+  },
+  "lib/test_github_token.py": {
+    "mtime": 1788000831.4175706,
+    "seen": 1792178829.7594051,
+    "ast_hash": "a4ab2b016966e756cdb59ff8476c5f80",
+    "semantic_hash": "a4ab2b016966e756cdb59ff8476c5f80"
+  },
+  "lib/test_prompt_injection.py": {
+    "mtime": 1788000879.181096,
+    "seen": 1792178829.75941,
+    "ast_hash": "035cdfa94d16a1983ba00cb02ce2ea9b",
+    "semantic_hash": "035cdfa94d16a1983ba00cb02ce2ea9b"
+  },
+  "lib/test_token_resolver.py": {
+    "mtime": 1788000831.4189548,
+    "seen": 1792178829.7594151,
+    "ast_hash": "75dbf130ba47f9d910a7abe485293f1b",
+    "semantic_hash": "75dbf130ba47f9d910a7abe485293f1b"
+  },
+  "lib/token_resolver.py": {
+    "mtime": 1788000831.4200575,
+    "seen": 1792178829.75942,
+    "ast_hash": "e490e7a1b06a924de06abd01dde1baf2",
+    "semantic_hash": "e490e7a1b06a924de06abd01dde1baf2"
+  },
+  "lib/trading_212_client.py": {
+    "mtime": 1788122705.120863,
+    "seen": 1792178829.759425,
+    "ast_hash": "8ac99c11dd6bde302be1aef98f93ca56",
+    "semantic_hash": "8ac99c11dd6bde302be1aef98f93ca56"
+  },
+  "lib/validation_remote.py": {
+    "mtime": 1788000879.1821878,
+    "seen": 1792178829.7594292,
+    "ast_hash": "e6a7e8336c1eb88a1b5b926189f82a61",
+    "semantic_hash": "e6a7e8336c1eb88a1b5b926189f82a61"
+  },
+  "mattermost-bridge/bridge.py": {
+    "mtime": 1790308958.952867,
+    "seen": 1792178829.759434,
+    "ast_hash": "4aadcdb8193664a6abc4343fd3a4a4a9",
+    "semantic_hash": "4aadcdb8193664a6abc4343fd3a4a4a9"
+  },
+  "mattermost-bridge/mm_join.py": {
+    "mtime": 1780637256.950189,
+    "seen": 1792178829.759438,
+    "ast_hash": "e764652a034a72995f0f26a97e4cc691",
+    "semantic_hash": "e764652a034a72995f0f26a97e4cc691"
+  },
+  "openbrain-client/client.py": {
+    "mtime": 1777368894.9328687,
+    "seen": 1792178829.759443,
+    "ast_hash": "6c17766ef9cd6406bd39ceecf395867f",
+    "semantic_hash": "6c17766ef9cd6406bd39ceecf395867f"
+  },
+  "rag-brain-manager/manager.py": {
+    "mtime": 1786181667.3366194,
+    "seen": 1792178829.759448,
+    "ast_hash": "76f2a4648dece3215133484d6257bfd2",
+    "semantic_hash": "76f2a4648dece3215133484d6257bfd2"
+  },
+  "system-admin/ecosystem_review.py": {
+    "mtime": 1788363392.050667,
+    "seen": 1792178829.7594519,
+    "ast_hash": "d4e7f25b5ce65d0b2ad808fe31dd7bdd",
+    "semantic_hash": "d4e7f25b5ce65d0b2ad808fe31dd7bdd"
+  }
+}

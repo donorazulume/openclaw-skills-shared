@@ -7,3 +7,7 @@ __pycache__/
 dist/
 build/
 .gmail_triage_state.json
+
+# Graphify local cache
+graphify-out/cache/
+graphify-out/ecosystem-graph.json
