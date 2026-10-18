@@ -1,23 +1,57 @@
 import json
 import os
+import random
 import re
 import shutil
 import sqlite3
 import sys
 import time
 
-OPENCLAW_HOME_DIR = os.getenv("OPENCLAW_HOME", os.path.expanduser("~/.openclaw"))
-JOBS_PATH = os.getenv("CRON_STORE_PATH", os.path.join(OPENCLAW_HOME_DIR, "cron", "jobs.json"))
-SQLITE_PATH = os.path.join(OPENCLAW_HOME_DIR, "state", "openclaw.sqlite")
-
 def _get_openclaw_home() -> str:
-    home = os.getenv("OPENCLAW_HOME", os.path.expanduser("~/.openclaw"))
+    home = os.getenv("OPENCLAW_HOME")
+    if not home:
+        if os.path.isdir("/home/node/.openclaw"):
+            home = "/home/node/.openclaw"
+        else:
+            home = os.path.expanduser("~/.openclaw")
+    elif not home.endswith(".openclaw") and os.path.isdir(os.path.join(home, ".openclaw")):
+        home = os.path.join(home, ".openclaw")
     if home.endswith("jobs.json"):
         return os.path.dirname(os.path.dirname(home))
     return home
 
+OPENCLAW_HOME_DIR = _get_openclaw_home()
+JOBS_PATH = os.getenv("CRON_STORE_PATH", os.path.join(OPENCLAW_HOME_DIR, "cron", "jobs.json"))
+SQLITE_PATH = os.path.join(OPENCLAW_HOME_DIR, "state", "openclaw.sqlite")
+
 def _get_sqlite_path() -> str:
     return os.path.join(_get_openclaw_home(), "state", "openclaw.sqlite")
+
+
+def _get_db_connection(timeout: float = 10.0, apply_jitter: bool = True) -> sqlite3.Connection | None:
+    """Issue #1093: Resilient SQLite connection with jitter and WAL concurrency pragmas.
+
+    Mitigates synchronous coordinator lock contention on the Node.js main thread by:
+    1. Applying pseudo-random jitter (50ms - 250ms) before connecting to de-synchronize multi-agent reservations.
+    2. Setting timeout to avoid instant lock wait exceptions.
+    3. Setting PRAGMA busy_timeout = 5000 (5s).
+    4. Enforcing PRAGMA journal_mode = WAL and PRAGMA synchronous = NORMAL.
+    """
+    db_path = _get_sqlite_path()
+    if not os.path.exists(db_path):
+        return None
+
+    if apply_jitter:
+        time.sleep(random.uniform(0.05, 0.25))
+
+    conn = sqlite3.connect(db_path, timeout=timeout)
+    try:
+        conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+    except Exception:
+        pass
+    return conn
+
 
 def get_effective_jobs_path() -> str:
     """Return the active cron jobs registry file path.
@@ -52,62 +86,67 @@ def _get_table_columns(cursor, table_name: str) -> set[str]:
 
 def load_jobs() -> dict:
     if os.path.exists(_get_sqlite_path()):
+        conn = None
         try:
-            conn = sqlite3.connect(_get_sqlite_path())
-            cursor = conn.cursor()
-            cols = _get_table_columns(cursor, "cron_jobs")
-            if cols:
-                cursor.execute("""
-                    SELECT job_id, name, payload_kind, enabled, job_json, state_json
-                    FROM cron_jobs
-                    WHERE store_key = ?
-                """, (get_effective_jobs_path(),))
-                seen_job_ids = set()
-                unique_jobs = []
-                for r in cursor.fetchall():
-                    jid, name, payload_kind, enabled, job_json_str, state_json_str = r
-                    if jid in seen_job_ids:
-                        continue
-                    seen_job_ids.add(jid)
+            conn = _get_db_connection(timeout=5.0, apply_jitter=False)
+            if conn:
+                cursor = conn.cursor()
+                cols = _get_table_columns(cursor, "cron_jobs")
+                if cols:
+                    cursor.execute("""
+                        SELECT job_id, name, payload_kind, enabled, job_json, state_json
+                        FROM cron_jobs
+                        WHERE store_key = ?
+                    """, (get_effective_jobs_path(),))
+                    seen_job_ids = set()
+                    unique_jobs = []
+                    for r in cursor.fetchall():
+                        jid, name, payload_kind, enabled, job_json_str, state_json_str = r
+                        if jid in seen_job_ids:
+                            continue
+                        seen_job_ids.add(jid)
 
-                    try:
-                        job = json.loads(job_json_str) if job_json_str else {}
-                    except Exception:
-                        job = {}
+                        try:
+                            job = json.loads(job_json_str) if job_json_str else {}
+                        except Exception:
+                            job = {}
 
-                    job["id"] = jid
-                    if name and not job.get("name"):
-                        job["name"] = name
-                    job["enabled"] = bool(enabled)
-                    sched = job.setdefault("schedule", {})
-                    if not sched.get("kind"):
-                        if sched.get("expr"):
-                            sched["kind"] = "cron"
-                        elif sched.get("everyMs"):
-                            sched["kind"] = "every"
-                        elif sched.get("at"):
-                            sched["kind"] = "at"
+                        job["id"] = jid
+                        if name and not job.get("name"):
+                            job["name"] = name
+                        job["enabled"] = bool(enabled)
+                        sched = job.setdefault("schedule", {})
+                        if not sched.get("kind"):
+                            if sched.get("expr"):
+                                sched["kind"] = "cron"
+                            elif sched.get("everyMs"):
+                                sched["kind"] = "every"
+                            elif sched.get("at"):
+                                sched["kind"] = "at"
 
-                    payload = job.setdefault("payload", {})
-                    if payload_kind:
-                        payload["kind"] = payload_kind
-                    elif not payload.get("kind"):
-                        payload["kind"] = "agentTurn"
+                        payload = job.setdefault("payload", {})
+                        if payload_kind:
+                            payload["kind"] = payload_kind
+                        elif not payload.get("kind"):
+                            payload["kind"] = "agentTurn"
 
-                    try:
-                        state = json.loads(state_json_str) if state_json_str else {}
-                    except Exception:
-                        state = {}
-                    job["state"] = state
+                        try:
+                            state = json.loads(state_json_str) if state_json_str else {}
+                        except Exception:
+                            state = {}
+                        job["state"] = state
 
-                    unique_jobs.append(job)
-                conn.close()
-                if unique_jobs:
-                    return {"jobs": unique_jobs}
-            else:
-                conn.close()
+                        unique_jobs.append(job)
+                    if unique_jobs:
+                        return {"jobs": unique_jobs}
         except Exception as e:
             print(f"DEBUG: SQLite load failed ({e}), falling back to JSON", file=sys.stderr)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     path_to_use = get_effective_jobs_path()
 
@@ -129,17 +168,22 @@ def load_jobs() -> dict:
 
 def save_jobs(data: dict) -> None:
     if os.path.exists(_get_sqlite_path()):
-        try:
-            conn = sqlite3.connect(_get_sqlite_path())
-            cursor = conn.cursor()
-            cols = _get_table_columns(cursor, "cron_jobs")
-            if cols:
+        conn = _get_db_connection(timeout=15.0, apply_jitter=True)
+        if conn:
+            try:
+                cursor = conn.cursor()
+                cols = _get_table_columns(cursor, "cron_jobs")
+                if not cols:
+                    return
                 for j in data.get("jobs", []):
                     if isinstance(j, dict) and not j.get("id"):
                         name = j.get("name", "")
                         j["id"] = re.sub(r'[^a-zA-Z0-9_-]', '-', name.lower()).strip('-') or f"job-{int(time.time())}"
                 valid_job_ids = [j["id"] for j in data.get("jobs", []) if isinstance(j, dict) and "id" in j and j.get("id")]
                 now_ms = int(time.time() * 1000)
+                target_store_key = os.getenv("CRON_STORE_PATH") or os.path.realpath(os.path.join(_get_openclaw_home(), "cron", "jobs.json"))
+
+                # Purge stale jobs across all known store keys
                 for store_key in get_all_store_keys():
                     if "declaration_key" in cols:
                         if valid_job_ids:
@@ -154,141 +198,231 @@ def save_jobs(data: dict) -> None:
                         else:
                             cursor.execute("DELETE FROM cron_jobs WHERE store_key = ?", (store_key,))
 
-                    for j in data.get("jobs", []):
-                        if not isinstance(j, dict) or not j.get("id"):
-                            continue
-                        jid = j["id"]
-                        jname = j.get("name", jid)
-                        jdesc = j.get("description")
-                        jenabled = 1 if j.get("enabled", True) else 0
-                        jagent = j.get("agentId", "main")
-                        payload = j.get("payload", {})
-                        pkind = payload.get("kind", "command")
-                        sched = j.get("schedule", {})
-                        delivery = j.get("delivery", {})
-                        state = j.get("state", {})
-                        jjson = json.dumps(j)
-                        sjson = json.dumps(state)
+                # Deduplicate any duplicate job_ids (Issue #820)
+                cursor.execute("""
+                    DELETE FROM cron_jobs WHERE rowid NOT IN (
+                        SELECT MIN(rowid) FROM cron_jobs GROUP BY job_id
+                    )
+                """)
+                if "owner_agent_id" in cols:
+                    cursor.execute("SELECT rowid, job_id FROM cron_jobs WHERE owner_agent_id IS NULL")
+                    for r_id, j_id in cursor.fetchall():
+                        j_lower = (j_id or "").lower()
+                        if any(k in j_lower for k in ["rob", "trading", "freetrade", "trade212", "firefly"]):
+                            owner = "rob"
+                        elif any(k in j_lower for k in ["amara", "property", "mail-monitor", "clickup-assigned"]):
+                            owner = "amara"
+                        else:
+                            owner = os.getenv("OPENCLAW_AGENT_NAME") or "roho"
+                        cursor.execute("UPDATE cron_jobs SET owner_agent_id = ? WHERE rowid = ?", (owner, r_id))
+                    cursor.execute("UPDATE cron_jobs SET owner_agent_id = ? WHERE owner_agent_id IS NULL", (os.getenv("OPENCLAW_AGENT_NAME") or "roho",))
+                try:
+                    # OpenClaw 2026.8.2 schema validator strictly enforces canonical secondary indexes (only idx_cron_jobs_store_order); PRIMARY KEY already covers (store_key, job_id)
+                    cursor.execute("DROP INDEX IF EXISTS idx_cron_jobs_store_job")
+                except Exception:
+                    pass
 
-                        if "declaration_key" in cols:
+                for j in data.get("jobs", []):
+                    if not isinstance(j, dict) or not j.get("id"):
+                        continue
+                    jid = j["id"]
+                    jname = j.get("name", jid)
+                    jdesc = j.get("description")
+                    jenabled = 1 if j.get("enabled", True) else 0
+                    jagent = j.get("agentId", "main")
+                    jowner = j.get("owner_agent_id") or j.get("ownerAgentId")
+                    if not jowner:
+                        jid_lower = jid.lower()
+                        if any(k in jid_lower for k in ["rob", "trading", "freetrade", "trade212", "firefly"]):
+                            jowner = "rob"
+                        elif any(k in jid_lower for k in ["amara", "property", "mail-monitor", "clickup-assigned"]):
+                            jowner = "amara"
+                        else:
+                            jowner = os.getenv("OPENCLAW_AGENT_NAME") or "roho"
+                    payload = j.get("payload", {})
+                    pkind = payload.get("kind", "command")
+                    sched = j.get("schedule", {})
+                    delivery = j.get("delivery", {})
+                    state = j.get("state", {})
+                    jjson = json.dumps(j)
+                    sjson = json.dumps(state)
+
+                    if "declaration_key" in cols:
+                        cursor.execute("SELECT job_id FROM cron_jobs WHERE store_key = ? AND job_id = ?", (target_store_key, jid))
+                        if cursor.fetchone():
+                            cursor.execute("""
+                                UPDATE cron_jobs SET
+                                    owner_agent_id = ?,
+                                    name = ?,
+                                    description = ?,
+                                    enabled = ?,
+                                    agent_id = ?,
+                                    payload_kind = ?,
+                                    job_json = ?,
+                                    state_json = ?,
+                                    runtime_updated_at_ms = ?,
+                                    updated_at = ?
+                                WHERE store_key = ? AND job_id = ?
+                            """, (jowner, jname, jdesc, jenabled, jagent, pkind, jjson, sjson, now_ms, now_ms, target_store_key, jid))
+                        else:
                             cursor.execute("""
                                 INSERT INTO cron_jobs (
                                     store_key, job_id, declaration_key, owner_agent_id, name, description,
                                     enabled, agent_id, payload_kind, job_json, state_json, runtime_updated_at_ms,
                                     schedule_identity, sort_order, updated_at
-                                ) VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?)
-                                ON CONFLICT(store_key, job_id) DO UPDATE SET
-                                    name = excluded.name,
-                                    description = excluded.description,
-                                    enabled = excluded.enabled,
-                                    payload_kind = excluded.payload_kind,
-                                    job_json = excluded.job_json,
-                                    updated_at = excluded.updated_at
-                            """, (store_key, jid, jname, jdesc, jenabled, jagent, pkind, jjson, sjson, now_ms, now_ms))
-                        else:
-                            cursor.execute("SELECT job_id FROM cron_jobs WHERE store_key = ? AND job_id = ?", (store_key, jid))
-                            res = cursor.fetchone()
-                            timeout_seconds = int(payload.get("timeoutMs") / 1000) if payload.get("timeoutMs") is not None else None
-                            consecutive_errors = state.get("consecutiveErrors", 0)
-                            last_run_status = state.get("lastStatus", "ok")
-                            last_error = state.get("lastError")
-                            last_delivery_status = state.get("lastDeliveryStatus")
-                            last_delivery_error = state.get("lastDeliveryError")
+                                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?)
+                            """, (target_store_key, jid, jowner, jname, jdesc, jenabled, jagent, pkind, jjson, sjson, now_ms, now_ms))
+                    else:
+                        cursor.execute("SELECT job_id FROM cron_jobs WHERE store_key = ? AND job_id = ?", (target_store_key, jid))
+                        res = cursor.fetchone()
+                        timeout_seconds = int(payload.get("timeoutMs") / 1000) if payload.get("timeoutMs") is not None else None
+                        consecutive_errors = state.get("consecutiveErrors", 0)
+                        last_run_status = state.get("lastStatus", "ok")
+                        last_error = state.get("lastError")
+                        last_delivery_status = state.get("lastDeliveryStatus")
+                        last_delivery_error = state.get("lastDeliveryError")
 
-                            if res:
-                                cursor.execute("""
-                                    UPDATE cron_jobs 
-                                    SET name = ?,
-                                        schedule_kind = ?,
-                                        schedule_expr = ?,
-                                        schedule_tz = ?,
-                                        payload_kind = ?,
-                                        payload_message = ?, 
-                                        payload_model = ?, 
-                                        payload_timeout_seconds = ?, 
-                                        session_target = ?, 
-                                        delivery_mode = ?, 
-                                        delivery_channel = ?, 
-                                        delivery_to = ?,
-                                        enabled = ?,
-                                        consecutive_errors = ?,
-                                        last_run_status = ?,
-                                        last_error = ?,
-                                        last_delivery_status = ?,
-                                        last_delivery_error = ?,
-                                        job_json = ?,
-                                        state_json = ?,
-                                        updated_at = STRFTIME('%s', 'now')
-                                    WHERE store_key = ? AND job_id = ?
-                                """, (
-                                    jname,
-                                    sched.get("kind", "cron"),
-                                    sched.get("expr"),
-                                    sched.get("tz"),
-                                    pkind,
-                                    payload.get("message"),
-                                    payload.get("model"),
-                                    timeout_seconds,
-                                    j.get("sessionTarget") or "isolated",
-                                    delivery.get("mode"),
-                                    delivery.get("channel"),
-                                    delivery.get("to"),
-                                    jenabled,
-                                    consecutive_errors,
-                                    last_run_status,
-                                    last_error,
-                                    last_delivery_status,
-                                    last_delivery_error,
-                                    jjson,
-                                    sjson,
-                                    store_key,
-                                    jid
-                                ))
-                            else:
-                                cursor.execute("""
-                                    INSERT INTO cron_jobs (
-                                        store_key, job_id, name, enabled, created_at_ms,
-                                        schedule_kind, schedule_expr, schedule_tz,
-                                        session_target, wake_mode, payload_kind, payload_message, payload_model,
-                                        delivery_mode, delivery_channel, delivery_to,
-                                        consecutive_errors, last_run_status, last_error, last_delivery_status, last_delivery_error,
-                                        job_json, state_json, updated_at
-                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, STRFTIME('%s', 'now'))
-                                """, (
-                                    store_key,
-                                    jid,
-                                    jname,
-                                    jenabled,
-                                    j.get("createdAtMs", now_ms),
-                                    sched.get("kind", "cron"),
-                                    sched.get("expr"),
-                                    sched.get("tz"),
-                                    j.get("sessionTarget", "isolated"),
-                                    j.get("wakeMode", "now"),
-                                    pkind,
-                                    payload.get("message"),
-                                    payload.get("model"),
-                                    delivery.get("mode"),
-                                    delivery.get("channel"),
-                                    delivery.get("to"),
-                                    consecutive_errors,
-                                    last_run_status,
-                                    last_error,
-                                    last_delivery_status,
-                                    last_delivery_error,
-                                    jjson,
-                                    sjson
-                                ))
+                        if res:
+                            cursor.execute("""
+                                UPDATE cron_jobs 
+                                SET name = ?,
+                                    schedule_kind = ?,
+                                    schedule_expr = ?,
+                                    schedule_tz = ?,
+                                    payload_kind = ?,
+                                    payload_message = ?, 
+                                    payload_model = ?, 
+                                    payload_timeout_seconds = ?, 
+                                    session_target = ?, 
+                                    delivery_mode = ?, 
+                                    delivery_channel = ?, 
+                                    delivery_to = ?,
+                                    enabled = ?,
+                                    consecutive_errors = ?,
+                                    last_run_status = ?,
+                                    last_error = ?,
+                                    last_delivery_status = ?,
+                                    last_delivery_error = ?,
+                                    job_json = ?,
+                                    state_json = ?,
+                                    updated_at = STRFTIME('%s', 'now')
+                                WHERE store_key = ? AND job_id = ?
+                            """, (
+                                jname,
+                                sched.get("kind", "cron"),
+                                sched.get("expr"),
+                                sched.get("tz"),
+                                pkind,
+                                payload.get("message"),
+                                payload.get("model"),
+                                timeout_seconds,
+                                j.get("sessionTarget") or "isolated",
+                                delivery.get("mode"),
+                                delivery.get("channel"),
+                                delivery.get("to"),
+                                jenabled,
+                                consecutive_errors,
+                                last_run_status,
+                                last_error,
+                                last_delivery_status,
+                                last_delivery_error,
+                                jjson,
+                                sjson,
+                                target_store_key,
+                                jid
+                            ))
+                        else:
+                            cursor.execute("""
+                                INSERT INTO cron_jobs (
+                                    store_key, job_id, name, enabled, created_at_ms,
+                                    schedule_kind, schedule_expr, schedule_tz,
+                                    session_target, wake_mode, payload_kind, payload_message, payload_model,
+                                    delivery_mode, delivery_channel, delivery_to,
+                                    consecutive_errors, last_run_status, last_error, last_delivery_status, last_delivery_error,
+                                    job_json, state_json, updated_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, STRFTIME('%s', 'now'))
+                            """, (
+                                target_store_key,
+                                jid,
+                                jname,
+                                jenabled,
+                                j.get("createdAtMs", now_ms),
+                                sched.get("kind", "cron"),
+                                sched.get("expr"),
+                                sched.get("tz"),
+                                j.get("sessionTarget", "isolated"),
+                                j.get("wakeMode", "now"),
+                                pkind,
+                                payload.get("message"),
+                                payload.get("model"),
+                                delivery.get("mode"),
+                                delivery.get("channel"),
+                                delivery.get("to"),
+                                consecutive_errors,
+                                last_run_status,
+                                last_error,
+                                last_delivery_status,
+                                last_delivery_error,
+                                jjson,
+                                sjson
+                            ))
+
+                # If any duplicate copies existed under other store keys (e.g. .migrated), prune them
+                cursor.execute("""
+                    DELETE FROM cron_jobs WHERE store_key != ? AND job_id IN (
+                        SELECT job_id FROM cron_jobs WHERE store_key = ?
+                    )
+                """, (target_store_key, target_store_key))
+
+                # Final deduplication pass (Issue #820)
+                cursor.execute("""
+                    DELETE FROM cron_jobs WHERE rowid NOT IN (
+                        SELECT MIN(rowid) FROM cron_jobs GROUP BY job_id
+                    )
+                """)
+                if "owner_agent_id" in cols:
+                    cursor.execute("SELECT rowid, job_id FROM cron_jobs WHERE owner_agent_id IS NULL")
+                    for r_id, j_id in cursor.fetchall():
+                        j_lower = (j_id or "").lower()
+                        if any(k in j_lower for k in ["rob", "trading", "freetrade", "trade212", "firefly"]):
+                            owner = "rob"
+                        elif any(k in j_lower for k in ["amara", "property", "mail-monitor", "clickup-assigned"]):
+                            owner = "amara"
+                        else:
+                            owner = os.getenv("OPENCLAW_AGENT_NAME") or "roho"
+                        cursor.execute("UPDATE cron_jobs SET owner_agent_id = ? WHERE rowid = ?", (owner, r_id))
+                    cursor.execute("UPDATE cron_jobs SET owner_agent_id = ? WHERE owner_agent_id IS NULL", (os.getenv("OPENCLAW_AGENT_NAME") or "roho",))
                 conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"DEBUG: SQLite save failed ({e}), falling back to JSON", file=sys.stderr)
+            except Exception as e:
+                print(f"DEBUG: SQLite save failed ({e}), falling back to JSON", file=sys.stderr)
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
     for store_key in get_all_store_keys():
-        os.makedirs(os.path.dirname(store_key), exist_ok=True)
-        with open(store_key, "w") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
+        try:
+            store_dir = os.path.dirname(store_key)
+            os.makedirs(store_dir, exist_ok=True)
+            tmp_key = f"{store_key}.tmp.{os.getpid()}"
+            with open(tmp_key, "w") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+            os.replace(tmp_key, store_key)
+        except PermissionError:
+            try:
+                with open(store_key, "w") as f:
+                    json.dump(data, f, indent=2)
+                    f.write("\n")
+            except PermissionError as pe2:
+                print(
+                    f"CRITICAL: cron_db.save_jobs() PermissionError writing {store_key}: {pe2}. "
+                    f"Staged in-memory edits were NOT persisted to disk!",
+                    file=sys.stderr,
+                )
+                raise
 
 
 def purge_stale_jobs_db() -> int:
@@ -307,35 +441,59 @@ def purge_stale_jobs_db() -> int:
     valid_ids = [j["id"] for j in data.get("jobs", []) if isinstance(j, dict) and "id" in j and j.get("id")]
 
     purged_count = 0
+    conn = None
     try:
-        conn = sqlite3.connect(_get_sqlite_path())
-        cursor = conn.cursor()
-        cols = _get_table_columns(cursor, "cron_jobs")
-        for store_key in get_all_store_keys():
-            if "declaration_key" in cols:
-                if valid_ids:
-                    placeholders = ",".join("?" for _ in valid_ids)
-                    cursor.execute(f"DELETE FROM cron_jobs WHERE store_key = ? AND declaration_key IS NULL AND job_id NOT IN ({placeholders})", [store_key] + valid_ids)
-                    purged_count += cursor.rowcount
+        conn = _get_db_connection(timeout=15.0, apply_jitter=True)
+        if conn:
+            cursor = conn.cursor()
+            cols = _get_table_columns(cursor, "cron_jobs")
+            for store_key in get_all_store_keys():
+                if "declaration_key" in cols:
+                    if valid_ids:
+                        placeholders = ",".join("?" for _ in valid_ids)
+                        cursor.execute(f"DELETE FROM cron_jobs WHERE store_key = ? AND declaration_key IS NULL AND job_id NOT IN ({placeholders})", [store_key] + valid_ids)
+                        purged_count += cursor.rowcount
+                    else:
+                        cursor.execute("DELETE FROM cron_jobs WHERE store_key = ? AND declaration_key IS NULL", (store_key,))
+                        purged_count += cursor.rowcount
                 else:
-                    cursor.execute("DELETE FROM cron_jobs WHERE store_key = ? AND declaration_key IS NULL", (store_key,))
-                    purged_count += cursor.rowcount
-            else:
-                if valid_ids:
-                    placeholders = ",".join("?" for _ in valid_ids)
-                    cursor.execute(f"DELETE FROM cron_jobs WHERE store_key = ? AND job_id NOT IN ({placeholders})", [store_key] + valid_ids)
-                    purged_count += cursor.rowcount
-                else:
-                    cursor.execute("DELETE FROM cron_jobs WHERE store_key = ?", (store_key,))
-                    purged_count += cursor.rowcount
+                    if valid_ids:
+                        placeholders = ",".join("?" for _ in valid_ids)
+                        cursor.execute(f"DELETE FROM cron_jobs WHERE store_key = ? AND job_id NOT IN ({placeholders})", [store_key] + valid_ids)
+                        purged_count += cursor.rowcount
+                    else:
+                        cursor.execute("DELETE FROM cron_jobs WHERE store_key = ?", (store_key,))
+                        purged_count += cursor.rowcount
 
-            if "consecutive_errors" in cols and "last_run_status" in cols:
-                cursor.execute("UPDATE cron_jobs SET consecutive_errors = 0, last_run_status = 'ok', last_error = NULL, last_delivery_status = NULL, last_delivery_error = NULL WHERE store_key = ? AND (consecutive_errors > 0 OR last_run_status = 'error')", (store_key,))
-        conn.commit()
-        conn.close()
+                if "consecutive_errors" in cols and "last_run_status" in cols:
+                    cursor.execute("UPDATE cron_jobs SET consecutive_errors = 0, last_run_status = 'ok', last_error = NULL, last_delivery_status = NULL, last_delivery_error = NULL WHERE store_key = ? AND (consecutive_errors > 0 OR last_run_status = 'error')", (store_key,))
+            # Deduplicate any duplicate job_ids (Issue #820)
+            cursor.execute("""
+                DELETE FROM cron_jobs WHERE rowid NOT IN (
+                    SELECT MIN(rowid) FROM cron_jobs GROUP BY job_id
+                )
+            """)
+            if "owner_agent_id" in cols:
+                cursor.execute("SELECT rowid, job_id FROM cron_jobs WHERE owner_agent_id IS NULL")
+                for r_id, j_id in cursor.fetchall():
+                    j_lower = (j_id or "").lower()
+                    if any(k in j_lower for k in ["rob", "trading", "freetrade", "trade212", "firefly"]):
+                        owner = "rob"
+                    elif any(k in j_lower for k in ["amara", "property", "mail-monitor", "clickup-assigned"]):
+                        owner = "amara"
+                    else:
+                        owner = os.getenv("OPENCLAW_AGENT_NAME") or "roho"
+                    cursor.execute("UPDATE cron_jobs SET owner_agent_id = ? WHERE rowid = ?", (owner, r_id))
+                cursor.execute("UPDATE cron_jobs SET owner_agent_id = ? WHERE owner_agent_id IS NULL", (os.getenv("OPENCLAW_AGENT_NAME") or "roho",))
+            conn.commit()
     except Exception as e:
         print(f"DEBUG: SQLite purge failed ({e})", file=sys.stderr)
-
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
     return purged_count
 
 
@@ -357,14 +515,21 @@ def delete_job(job_id: str) -> None:
             
     # Delete from SQLite
     if os.path.exists(_get_sqlite_path()):
+        conn = None
         try:
-            conn = sqlite3.connect(_get_sqlite_path())
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM cron_jobs WHERE store_key = ? AND job_id = ?", (get_effective_jobs_path(), job_id,))
-            conn.commit()
-            conn.close()
+            conn = _get_db_connection(timeout=10.0, apply_jitter=True)
+            if conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM cron_jobs WHERE store_key = ? AND job_id = ?", (get_effective_jobs_path(), job_id,))
+                conn.commit()
         except Exception as e:
             print(f"DEBUG: SQLite delete failed ({e})", file=sys.stderr)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 
 def set_job_in_flight(job_id: str, in_flight: bool = True) -> None:
