@@ -1,6 +1,6 @@
 ---
 name: rag-brain-manager
-description: Synchronizes, queries, and manages Roho's multi-collection ChromaDB knowledge base with hybrid search, pluggable embeddings, and benchmarking.
+description: Synchronizes, queries, and manages Roho's multi-collection ChromaDB knowledge base with hybrid search and nomic-embed-text-v1.5 embeddings (the only embedding model).
 metadata: {"openclaw":{"requires":{"bins":["python3"]},"emoji":"🧠","skillVersion":"1.1.0"}}
 ---
 
@@ -11,7 +11,7 @@ Manages the ChromaDB vector database (Central Brain). Supports two modes:
 
 Supports multiple named collections — each collection is a separate knowledge domain (e.g. `letters`, `mortgages`, `projects`).
 
-Supports pluggable embedding models, hybrid search (semantic + BM25 keyword), cross-encoder reranking, and embedding benchmarking (SPEC-RAG-001). **SPEC-RAG-003:** routine retrieval should prefer **`openbrain-client --action smart-query`** against the MCP server so governance + compression apply; **SPEC-RAG-004:** optional **`--expand-query`** lives on **`openbrain-client`** (not this skill) — `rag-brain-manager` talks to Chroma directly and does not run the LLM rewriter. Direct **`rag-brain-manager`** remains for operator/Chroma maintenance.
+Uses a single embedding model — `nomic-embed-text-v1.5` (768-d, served by the Open Brain MCP) — with hybrid search (semantic + BM25 keyword) and cross-encoder reranking (SPEC-RAG-001). **SPEC-RAG-003:** routine retrieval should prefer **`openbrain-client --action smart-query`** against the MCP server so governance + compression apply; **SPEC-RAG-004:** optional **`--expand-query`** lives on **`openbrain-client`** (not this skill) — `rag-brain-manager` talks to Chroma directly and does not run the LLM rewriter. Direct **`rag-brain-manager`** remains for operator/Chroma maintenance.
 
 **Issue #309:** Shared logic lives in **`packages/openclaw_skills/openclaw_skills/rag_brain_manager.py`**; this skill’s **`manager.py`** bootstraps `sys.path` and delegates — sync **`packages/openclaw_skills`** whenever you sync **`skills/`** / **`skills-amara/`**.
 
@@ -25,12 +25,12 @@ Supports pluggable embedding models, hybrid search (semantic + BM25 keyword), cr
 **Server mode** (`CHROMA_SERVER_URL=http://rag-brain:8000`):
 1. **Connect** — HTTP client to the ChromaDB server.
 2. **Execute** — run the requested vector operation.
-3. **Embed** — vectorize text using the active embedding model.
+3. **Embed** — vectorize text with `nomic-embed-text-v1.5` (via Open Brain MCP `/api/embed`).
 
 **Embedded mode** (no `CHROMA_SERVER_URL`):
 1. **Sync Down** — pull ChromaDB files from GCS to local persistent storage.
 2. **Execute** — run the requested vector operation locally.
-3. **Embed** — vectorize text using the active embedding model.
+3. **Embed** — vectorize text with `nomic-embed-text-v1.5` (via Open Brain MCP `/api/embed`).
 4. **Sync Up** — if the operation mutated data, push updated files back to GCS.
 
 Roho chains `document-processor` (PDF → Markdown → metadata.json) then this skill (Markdown → vectors).
@@ -67,8 +67,7 @@ Collection names: 3–63 chars, alphanumeric/hyphen/underscore, must start and e
 - **`--where`**: Metadata filters (JSON string) passed to ChromaDB `where` parameter.
 
 ### Embedding Management
-- **benchmark**: Evaluate embedding models against a curated JSONL test set. Computes NDCG@5, MRR@5, Recall@5 per model.
-- **re-embed**: Migrate a collection to a new embedding model without data loss.
+- **benchmark** / **re-embed**: *Deferred* — return `UNSUPPORTED_ACTION` via the MCP endpoint. Multi-model benchmarking is obsolete: `nomic-embed-text-v1.5` is the only permitted embedding model, so there is nothing to compare or migrate to.
 
 ### Findings (SPEC-SYSADMIN-002.1)
 
@@ -103,15 +102,6 @@ python3 {baseDir}/manager.py --action ingest \
   --collection mortgage_docs \
   --file "/path/to/Precise-Mortgages-Arrears.md" \
   --source-name "2025-04-22_Precise-Mortgages_Arrears"
-```
-
-### Ingest with a specific embedding model
-```bash
-python3 {baseDir}/manager.py --action ingest \
-  --collection mortgage_docs \
-  --file "/path/to/document.md" \
-  --source-name "document-v1" \
-  --embedding-model nomic-embed-text-v1.5
 ```
 
 ### Query — semantic (default)
@@ -165,27 +155,6 @@ python3 {baseDir}/manager.py --action query \
   --search-mode hybrid
 ```
 
-### Benchmark embedding models
-```bash
-python3 {baseDir}/manager.py --action benchmark \
-  --benchmark-file /path/to/benchmark.jsonl \
-  --embedding-models gemini-embedding-001,nomic-embed-text-v1.5,bge-large-en-v1.5
-```
-
-### Re-embed a collection with a new model
-```bash
-# Dry run first (validates without deleting original)
-python3 {baseDir}/manager.py --action re-embed \
-  --collection mortgage_docs \
-  --embedding-model nomic-embed-text-v1.5 \
-  --dry-run
-
-# Execute migration
-python3 {baseDir}/manager.py --action re-embed \
-  --collection mortgage_docs \
-  --embedding-model nomic-embed-text-v1.5
-```
-
 ### Re-ingest an updated document (delete old chunks first)
 ```bash
 python3 {baseDir}/manager.py --action delete-source \
@@ -233,12 +202,9 @@ python3 {baseDir}/manager.py --action restore --backup-timestamp 20260307T120000
 
 | Model ID | Type | Dimensions | Notes |
 |---|---|---|---|
-| `nomic-embed-text-v1.5` | Local (HuggingFace) | 768 | Default. CPU inference. Good general-purpose. |
-| `gemini-embedding-001` | API (Gemini) | 768 | Deprecated fallback. Uses `GEMINI_API_KEY`. |
-| `bge-large-en-v1.5` | Local (HuggingFace) | 1024 | CPU inference. BAAI model. |
-| `snowflake-arctic-embed-l` | Local (HuggingFace) | 1024 | CPU inference. Strong retrieval benchmarks. |
+| `nomic-embed-text-v1.5` | Local (HuggingFace `nomic-ai/nomic-embed-text-v1.5`, revision-pinned) | 768 | **Only** permitted embedding model. CPU inference inside `openclaw-mcp-server`. |
 
-Each collection tracks its embedding model in metadata. Ingesting with a different model than the collection's stored model will error — use `--action re-embed` to migrate.
+No other embedding model or provider (Gemini, OpenAI, BGE, Snowflake, Chroma's default MiniLM) is supported. All vectors are produced by the Open Brain MCP server; `--embedding-model` is accepted for backward compatibility but ignored. The cross-encoder reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`) is not an embedder.
 
 ## Collection Architecture (SPEC-RAG-002)
 
@@ -253,8 +219,7 @@ Migrated documents carry an `original_collection` metadata field for provenance 
 
 ## Environment Variables
 
-* `GEMINI_API_KEY` — Google AI API key for `gemini-embedding-001` (already in Doppler). `GOOGLE_API_KEY` accepted as fallback.
-* `RAG_EMBEDDING_MODEL` — Active embedding model ID (default: `nomic-embed-text-v1.5`). Override per-invocation with `--embedding-model`.
+* `RAG_EMBEDDING_MODEL` — Must be `nomic-embed-text-v1.5` (the only supported value; read by `openclaw-mcp-server`).
 * `RAG_RERANK_ENABLED` — Set to `true` to enable cross-encoder reranking by default (default: `false`). Override per-invocation with `--rerank`.
 * `GCP_SERVICE_ACCOUNT_KEY` — JSON string of a GCP service account with Storage Object Admin on the bucket.
 * `CHROMA_GCS_BUCKET` — GCS bucket name (default: `ai-letter-analyst-state`).
