@@ -76,6 +76,19 @@ def get_all_store_keys() -> list[str]:
     return list(dict.fromkeys(keys))
 
 
+def _file_mirror_path(path: str) -> str:
+    """On-disk mirror path for a cron store key (NOT the SQLite store_key itself).
+
+    OpenClaw >= 2026.10.1 treats ``<state>/cron/jobs.json`` as a retired legacy store: Doctor and
+    ``openclaw update`` refuse to run while it exists, which blocks the 2026.11.1 agent-DB migration.
+    When the SQLite state DB exists (authoritative), the JSON mirror lives at ``jobs.json.seed``;
+    without a DB (dev/test) the historical ``jobs.json`` path is kept.
+    """
+    if os.path.basename(path) == "jobs.json" and os.path.exists(_get_sqlite_path()):
+        return path + ".seed"
+    return path
+
+
 def _get_table_columns(cursor, table_name: str) -> set[str]:
     try:
         cursor.execute(f"PRAGMA table_info({table_name})")
@@ -149,6 +162,8 @@ def load_jobs() -> dict:
                     pass
 
     path_to_use = get_effective_jobs_path()
+    if not os.path.exists(path_to_use) and os.path.exists(path_to_use + ".seed"):
+        path_to_use = path_to_use + ".seed"
 
     if os.path.exists(path_to_use):
         with open(path_to_use) as f:
@@ -402,7 +417,7 @@ def save_jobs(data: dict) -> None:
                     except Exception:
                         pass
 
-    for store_key in get_all_store_keys():
+    for store_key in dict.fromkeys(_file_mirror_path(k) for k in get_all_store_keys()):
         try:
             store_dir = os.path.dirname(store_key)
             os.makedirs(store_dir, exist_ok=True)
@@ -499,8 +514,8 @@ def purge_stale_jobs_db() -> int:
 
 
 def delete_job(job_id: str) -> None:
-    # Delete from JSON
-    path_to_use = get_effective_jobs_path()
+    # Delete from JSON mirror (never resurrect the retired cron/jobs.json when SQLite exists)
+    path_to_use = _file_mirror_path(get_effective_jobs_path())
     if os.path.exists(path_to_use):
         try:
             with open(path_to_use) as f:
