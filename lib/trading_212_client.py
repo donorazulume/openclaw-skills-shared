@@ -87,25 +87,35 @@ def get_portfolio_positions(timeout: float = DEFAULT_TIMEOUT_SEC) -> list[dict[s
             and (ticker.endswith(("_L_EQ", "L_EQ", "_GB_EQ", "_UK_EQ")) or ticker.startswith("SGLN"))
         )
 
+        resolved_currency = raw_curr or ("GBX" if is_pence else ("USD" if ticker.endswith("_US_EQ") else "GBP"))
+        val_in_acct: float | None = None
         if "value_in_account_currency" in item and item["value_in_account_currency"] is not None:
             market_val = float(item["value_in_account_currency"])
+            val_in_acct = round(market_val, 2)
         elif is_pence:
             market_val = (quantity * curr_price) / 100.0
             avg_price = avg_price / 100.0
             curr_price = curr_price / 100.0
+            val_in_acct = round(market_val, 2)
         else:
             market_val = float(item.get("marketValue") or item.get("market_value") or item.get("value") or (quantity * curr_price))
+            if resolved_currency == "GBP":
+                val_in_acct = round(market_val, 2)
 
         total_invested += market_val
-        positions.append({
+        pos_entry: dict[str, Any] = {
             "ticker": ticker,
             "quantity": quantity,
             "average_price": round(avg_price, 4),
             "current_price": round(curr_price, 4),
+            "currency": resolved_currency,
             "market_value": round(market_val, 2),
             "ppl": round(ppl, 2),
             "allocation_percent": 0.0,
-        })
+        }
+        if val_in_acct is not None:
+            pos_entry["value_in_account_currency"] = val_in_acct
+        positions.append(pos_entry)
 
     # Second pass: calculate allocation percentages
     if total_invested > 0:
